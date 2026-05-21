@@ -16,15 +16,15 @@ routing:
 The live score is:
 
 ```text
-weekly_remaining / max(hours_until_weekly_reset, 1) + expiry_urgency_bonus + manual_adjustment
+quota_remaining / max(hours_until_quota_reset, 1) + expiry_urgency_bonus + manual_adjustment
 ```
 
 Important fields:
 
-- `weekly_remaining`: parsed from Codex `/usage`.
-- `hours_until_weekly_reset`: derived from the weekly reset timestamp.
-- `expiry_urgency_bonus`: small bonus for accounts whose weekly reset is within 24 hours.
-- `manual_adjustment`: operator-controlled weight, accepted range `-100` to `100`.
+- `quota_remaining`: prefers the weekly window when present, otherwise falls back to the five-hour window.
+- `hours_until_quota_reset`: derived from the selected quota window reset timestamp.
+- `expiry_urgency_bonus`: small bonus for accounts whose selected quota reset is within 24 hours.
+- `manual_adjustment`: operator-controlled score adjustment, accepted range `-100` to `100`.
 
 The selected Codex account is sticky while it remains usable. Sticky state is released before a reset probe so a recovered account can be recalculated cleanly.
 

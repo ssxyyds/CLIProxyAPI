@@ -8,7 +8,7 @@ import (
 
 const CodexScoreExplanationMetadataKey = "codex_score_explanation"
 
-const codexScoreFormulaLabel = "weekly_remaining / max(hours_until_weekly_reset, 1) + expiry_urgency_bonus + manual_adjustment"
+const codexScoreFormulaLabel = "quota_remaining / max(hours_until_quota_reset, 1) + expiry_urgency_bonus + manual_adjustment"
 const codexScoreExpiryUrgencyWindowHours = 24.0
 
 type CodexScoreExplanation struct {
@@ -47,28 +47,29 @@ func BuildCodexScoreExplanation(auth *Auth, now time.Time) CodexScoreExplanation
 		explanation.DisqualifierReason = "missing_quota_state"
 		return explanation
 	}
+	explanation.RefreshStatus = strings.TrimSpace(quota.RefreshStatus)
+	explanation.RefreshIsFresh = codexQuotaRefreshStateUsable(quota, now)
+
+	scoreBucket, scoreWindow := codexScoreBucket(quota)
 	if quota.Weekly.Remaining != nil {
 		explanation.WeeklyRemaining = float64Ptr(*quota.Weekly.Remaining)
 	}
 	if quota.Weekly.Limit != nil {
 		explanation.WeeklyLimit = float64Ptr(*quota.Weekly.Limit)
 	}
-	explanation.RefreshStatus = strings.TrimSpace(quota.RefreshStatus)
-	explanation.RefreshIsFresh = codexQuotaRefreshStateUsable(quota, now)
-
-	if quota.Weekly.Remaining == nil {
-		explanation.DisqualifierReason = "missing_weekly_remaining"
+	if scoreBucket.Remaining == nil {
+		explanation.DisqualifierReason = "missing_quota_remaining"
 		return explanation
 	}
-	if quota.Weekly.ResetAt == nil || quota.Weekly.ResetAt.IsZero() {
-		explanation.DisqualifierReason = "missing_weekly_reset"
+	if scoreBucket.ResetAt == nil || scoreBucket.ResetAt.IsZero() {
+		explanation.DisqualifierReason = "missing_quota_reset"
 		return explanation
 	}
-	if !quota.Weekly.ResetAt.After(now) {
-		explanation.DisqualifierReason = "weekly_reset_elapsed"
+	if !scoreBucket.ResetAt.After(now) {
+		explanation.DisqualifierReason = scoreWindow + "_reset_elapsed"
 		return explanation
 	}
-	hoursUntilReset := quota.Weekly.ResetAt.Sub(now).Hours()
+	hoursUntilReset := scoreBucket.ResetAt.Sub(now).Hours()
 	explanation.HoursUntilWeeklyReset = float64Ptr(hoursUntilReset)
 	if !explanation.RefreshIsFresh {
 		explanation.DisqualifierReason = codexRefreshDisqualifierReason(quota, now)
@@ -79,12 +80,19 @@ func BuildCodexScoreExplanation(auth *Auth, now time.Time) CodexScoreExplanation
 	}
 	expiryUrgencyBonus := codexExpiryUrgencyBonus(hoursUntilReset)
 	explanation.ExpiryUrgencyBonus = float64Ptr(expiryUrgencyBonus)
-	computedScoreLive := (*quota.Weekly.Remaining / hoursUntilReset) + expiryUrgencyBonus + manualAdjustment
+	computedScoreLive := (*scoreBucket.Remaining / hoursUntilReset) + expiryUrgencyBonus + manualAdjustment
 	explanation.ScoreAvailable = true
 	explanation.ComputedScoreLive = float64Ptr(computedScoreLive)
 	explanation.Formula = fmt.Sprintf("final_score = %s", codexScoreFormulaLabel)
 	explanation.FormulaLabel = codexScoreFormulaLabel
 	return explanation
+}
+
+func codexScoreBucket(quota CodexQuotaState) (CodexQuotaBucket, string) {
+	if quota.Weekly.Remaining != nil || quota.Weekly.ResetAt != nil {
+		return quota.Weekly, "weekly"
+	}
+	return quota.FiveHour, "five_hour"
 }
 
 func codexExpiryUrgencyBonus(hoursUntilReset float64) float64 {
