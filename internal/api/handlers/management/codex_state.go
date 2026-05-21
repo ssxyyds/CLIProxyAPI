@@ -18,10 +18,11 @@ const (
 )
 
 type codexStateRefreshRequest struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	AuthIndex string `json:"auth_index"`
-	All       bool   `json:"all"`
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	AuthIndex   string   `json:"auth_index"`
+	AuthIndexes []string `json:"auth_indexes"`
+	All         bool     `json:"all"`
 }
 
 func (h *Handler) PostCodexStateRecalc(c *gin.Context) {
@@ -60,9 +61,20 @@ func (h *Handler) GetCodexState(c *gin.Context) {
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"codex-state": items,
-		"summary":     buildCodexStateSummary(auths),
+		"codex-state":      items,
+		"summary":          buildCodexStateSummary(auths),
+		"routing_strategy": h.codexRoutingStrategy(),
 	})
+}
+
+func (h *Handler) codexRoutingStrategy() string {
+	if h == nil || h.cfg == nil {
+		return "round-robin"
+	}
+	if strategy := strings.TrimSpace(h.cfg.Routing.Strategy); strategy != "" {
+		return strategy
+	}
+	return "round-robin"
 }
 
 func (h *Handler) PatchCodexStateManualScore(c *gin.Context) {
@@ -141,6 +153,30 @@ func (h *Handler) PostCodexStateRefresh(c *gin.Context) {
 				return
 			}
 			refreshed = append(refreshed, gin.H{"id": auth.ID, "auth_index": auth.EnsureIndex(), "name": codexStateName(auth)})
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "refreshed": refreshed})
+		return
+	}
+	if len(req.AuthIndexes) > 0 {
+		refreshed := make([]gin.H, 0, len(req.AuthIndexes))
+		for _, authIndex := range req.AuthIndexes {
+			targetAuth, err := h.findManagedCodexAuth("", "", authIndex)
+			if err != nil {
+				status := http.StatusBadRequest
+				switch err.Error() {
+				case "auth not found":
+					status = http.StatusNotFound
+				case "core auth manager unavailable":
+					status = http.StatusServiceUnavailable
+				}
+				c.JSON(status, gin.H{"error": err.Error(), "auth_index": authIndex})
+				return
+			}
+			if err := h.authManager.RefreshNow(ctx, targetAuth.ID); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to refresh auth %s: %v", targetAuth.ID, err)})
+				return
+			}
+			refreshed = append(refreshed, gin.H{"id": targetAuth.ID, "auth_index": targetAuth.EnsureIndex(), "name": codexStateName(targetAuth)})
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "refreshed": refreshed})
 		return

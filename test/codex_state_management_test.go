@@ -200,6 +200,13 @@ func TestGetCodexState(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
 	}
+	var response map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal codex state response: %v", err)
+	}
+	if response["routing_strategy"] != "round-robin" {
+		t.Fatalf("expected routing strategy round-robin, got %#v", response["routing_strategy"])
+	}
 
 	items := decodeCodexStateItems(t, w.Body.Bytes())
 	if len(items) != 1 {
@@ -555,6 +562,24 @@ func TestPostCodexStateRefresh_SingleAuth(t *testing.T) {
 	quota, ok := updated.GetCodexQuotaState()
 	if !ok || quota.LastRefreshAt == nil || quota.RefreshStatus != "ok" {
 		t.Fatalf("expected refreshed quota state, got %#v, %v", quota, ok)
+	}
+}
+
+func TestPostCodexStateRefresh_AuthIndexList(t *testing.T) {
+	h, _, exec, oauthAuth, _, _ := newCodexManagementHandler(t)
+	r := setupCodexManagementRouter(h)
+
+	body := `{"auth_indexes":["` + oauthAuth.EnsureIndex() + `"]}`
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/codex-state/refresh", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+	if exec.count(oauthAuth.ID) != 1 {
+		t.Fatalf("expected oauth codex auth to refresh once, got %d", exec.count(oauthAuth.ID))
 	}
 }
 

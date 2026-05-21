@@ -40,6 +40,7 @@ Important response fields:
 
 - `id`, `auth_index`, `name`, `email`
 - `provider`, `status`, `disabled`, `unavailable`
+- `account_type`, `account`, `id_token.plan_type`: account plan/type hints such as `free`, `team`, or `plus`
 - `on_device`: whether this account is currently sticky-selected
 - `codex_quota`: five-hour and weekly quota windows
 - `codex_score_explanation`: score inputs, final score, freshness, and disqualifier reason
@@ -47,6 +48,7 @@ Important response fields:
 - `codex_computed_score`
 - `codex_score_reason`
 - `codex_last_selection_reason`
+- `routing_strategy`: current routing strategy, for example `codex-quota-score`, `fill-first`, or `round-robin`
 
 The response also includes `summary` for pool-level statistics:
 
@@ -73,7 +75,8 @@ The response also includes `summary` for pool-level statistics:
       "remaining_ratio": 0.2471
     },
     "last_refresh_at": "2026-05-21T06:30:00Z"
-  }
+  },
+  "routing_strategy": "codex-quota-score"
 }
 ```
 
