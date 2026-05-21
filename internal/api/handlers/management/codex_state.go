@@ -266,13 +266,12 @@ func buildCodexStateEntry(auth *coreauth.Auth) gin.H {
 	if email := authEmail(auth); email != "" {
 		entry["email"] = email
 	}
-	if accountType, account := auth.AccountInfo(); accountType != "" || account != "" {
-		if accountType != "" {
-			entry["account_type"] = accountType
-		}
-		if account != "" {
-			entry["account"] = account
-		}
+	if _, account := auth.AccountInfo(); account != "" {
+		entry["account"] = account
+	}
+	if planType := codexPlanType(auth); planType != "" {
+		entry["account_type"] = planType
+		entry["plan_type"] = planType
 	}
 	if quota, ok := auth.GetCodexQuotaState(); ok {
 		entry[coreauth.CodexQuotaMetadataKey] = quota
@@ -293,6 +292,21 @@ func buildCodexStateEntry(auth *coreauth.Auth) gin.H {
 		entry["id_token"] = claims
 	}
 	return entry
+}
+
+func codexPlanType(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if v := strings.TrimSpace(auth.Attributes["plan_type"]); v != "" {
+		return v
+	}
+	if claims := extractCodexIDTokenClaims(auth); claims != nil {
+		if v, ok := claims["plan_type"].(string); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
 type codexQuotaPoolWindowSummary struct {

@@ -263,6 +263,12 @@ func TestGetCodexState(t *testing.T) {
 	if idToken["plan_type"] != "plus" {
 		t.Fatalf("unexpected plan_type: %#v", idToken["plan_type"])
 	}
+	if item["account_type"] != "plus" {
+		t.Fatalf("expected account_type to be plan type plus, got %#v", item["account_type"])
+	}
+	if item["plan_type"] != "plus" {
+		t.Fatalf("expected top-level plan_type plus, got %#v", item["plan_type"])
+	}
 }
 
 func TestGetCodexState_IncludesPoolSummary(t *testing.T) {

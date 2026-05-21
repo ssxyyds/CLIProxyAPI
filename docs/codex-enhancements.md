@@ -40,7 +40,8 @@ Important response fields:
 
 - `id`, `auth_index`, `name`, `email`
 - `provider`, `status`, `disabled`, `unavailable`
-- `account_type`, `account`, `id_token.plan_type`: account plan/type hints such as `free`, `team`, or `plus`
+- `account_type`, `plan_type`, `id_token.plan_type`: Codex plan/package hints such as `free`, `team`, or `plus`
+- `account`: account label derived from the auth metadata
 - `on_device`: whether this account is currently sticky-selected
 - `codex_quota`: five-hour and weekly quota windows
 - `codex_score_explanation`: score inputs, final score, freshness, and disqualifier reason
