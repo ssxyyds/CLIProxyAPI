@@ -231,7 +231,7 @@ func TestGetCodexState(t *testing.T) {
 	if explanation["refresh_is_fresh"] != true {
 		t.Fatalf("expected refresh_is_fresh true, got %#v", explanation["refresh_is_fresh"])
 	}
-	if explanation["formula_label"] != "weekly_remaining / max(hours_until_weekly_reset, 1) + expiry_urgency_bonus + manual_adjustment" {
+	if explanation["formula_label"] != "quota_remaining / max(hours_until_quota_reset, 1) + expiry_urgency_bonus + manual_adjustment" {
 		t.Fatalf("unexpected formula_label: %#v", explanation["formula_label"])
 	}
 	if _, ok := explanation["expiry_urgency_bonus"].(float64); !ok {
