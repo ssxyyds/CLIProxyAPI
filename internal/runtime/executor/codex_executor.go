@@ -822,31 +822,55 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 			refreshToken = v
 		}
 	}
-	if refreshToken == "" {
-		return auth, nil
-	}
-	svc := codexauth.NewCodexAuthWithProxyURL(e.cfg, auth.ProxyURL)
-	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
-	if err != nil {
-		return nil, err
-	}
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)
 	}
-	auth.Metadata["id_token"] = td.IDToken
-	auth.Metadata["access_token"] = td.AccessToken
-	if td.RefreshToken != "" {
-		auth.Metadata["refresh_token"] = td.RefreshToken
+	if refreshToken != "" {
+		svc := codexauth.NewCodexAuthWithProxyURL(e.cfg, auth.ProxyURL)
+		td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
+		if err != nil {
+			return nil, err
+		}
+		auth.Metadata["id_token"] = td.IDToken
+		auth.Metadata["access_token"] = td.AccessToken
+		if td.RefreshToken != "" {
+			auth.Metadata["refresh_token"] = td.RefreshToken
+		}
+		if td.AccountID != "" {
+			auth.Metadata["account_id"] = td.AccountID
+		}
+		auth.Metadata["email"] = td.Email
+		// Use unified key in files
+		auth.Metadata["expired"] = td.Expire
+		auth.Metadata["type"] = "codex"
 	}
-	if td.AccountID != "" {
-		auth.Metadata["account_id"] = td.AccountID
+	now := time.Now().UTC()
+	if cliproxyauth.IsCodexOAuthLikeAuth(auth) {
+		cliproxyauth.EnsureCodexQuotaRefreshMetadata(auth)
+		if quotaState, blockedUntil, err := e.refreshCodexQuotaState(ctx, auth, now); err != nil {
+			previous, _ := auth.GetCodexQuotaState()
+			previous.RefreshStatus = "error"
+			previous.RefreshError = strings.TrimSpace(err.Error())
+			auth.SetCodexQuotaState(previous)
+		} else {
+			verifiedRecovery := false
+			if blockedUntil == nil {
+				if probeResetAt, ok := quotaState.CodexProbeEligibleResetAt(now); ok {
+					quotaState, verifiedRecovery = e.verifyCodexQuotaRecovery(ctx, auth, quotaState, now, *probeResetAt)
+				} else if windowResetAt, ok := quotaState.CodexProbeWindowResetAt(now); ok {
+					verifiedRecovery = quotaState.CodexProbeVerifiedForReset(*windowResetAt)
+				}
+			}
+			auth.SetCodexQuotaState(quotaState)
+			switch {
+			case blockedUntil != nil:
+				cliproxyauth.ApplyCodexQuotaBlockedUntil(auth, blockedUntil)
+			case verifiedRecovery:
+				cliproxyauth.ApplyCodexQuotaBlockedUntil(auth, nil)
+			}
+		}
 	}
-	auth.Metadata["email"] = td.Email
-	// Use unified key in files
-	auth.Metadata["expired"] = td.Expire
-	auth.Metadata["type"] = "codex"
-	now := time.Now().Format(time.RFC3339)
-	auth.Metadata["last_refresh"] = now
+	auth.Metadata["last_refresh"] = now.Format(time.RFC3339)
 	return auth, nil
 }
 

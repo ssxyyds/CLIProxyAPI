@@ -73,6 +73,8 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 		cfg.MaxRetryCredentials = 0
 	}
 
+	cfg.Routing.Strategy = NormalizeRoutingStrategy(cfg.Routing.Strategy)
+
 	// Apply the same sanitization pipeline.
 	cfg.SanitizeGeminiKeys()
 	cfg.SanitizeVertexCompatKeys()

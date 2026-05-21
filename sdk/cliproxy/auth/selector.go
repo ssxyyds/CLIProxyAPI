@@ -35,6 +35,23 @@ type RoundRobinSelector struct {
 // rolling-window subscription caps (e.g. chat message limits).
 type FillFirstSelector struct{}
 
+// CodexQuotaScoreSelector applies Codex quota-aware ranking when every candidate
+// in the active slice is a Codex auth. Otherwise it falls back to round-robin.
+type CodexQuotaScoreSelector struct {
+	fallback FillFirstSelector
+	sticky   *codexStickySelectionState
+}
+
+type codexStickySelectionState struct {
+	mu         sync.Mutex
+	byKey      map[string]string
+	byProvider map[string]string
+}
+
+var globalCodexStickySelection = &codexStickySelectionState{byKey: map[string]string{}, byProvider: map[string]string{}}
+
+const codexQuotaScoreFreshnessWindow = 15 * time.Minute
+
 type blockReason int
 
 const (
@@ -366,6 +383,389 @@ func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, op
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
 	return available[0], nil
+}
+
+func (s *CodexQuotaScoreSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	now := time.Now()
+	available, err := getAvailableAuths(auths, provider, model, now)
+	if err != nil {
+		return nil, err
+	}
+	available = preferCodexWebsocketAuths(ctx, provider, available)
+	if canUseCodexQuotaScoreSelection(provider, available) {
+		if picked := pickStickyOrBestCodexQuotaScoreAuth(s.stickyState(), provider, model, available, now); picked != nil {
+			return picked, nil
+		}
+	}
+	return s.fallback.Pick(ctx, provider, model, opts, auths)
+}
+
+func (s *CodexQuotaScoreSelector) stickyState() *codexStickySelectionState {
+	if s == nil || s.sticky == nil {
+		return globalCodexStickySelection
+	}
+	return s.sticky
+}
+
+type codexQuotaScoreSnapshot struct {
+	auth                   *Auth
+	hasKnownScore          bool
+	finalScore             float64
+	hasWeeklyRemaining     bool
+	weeklyRemaining        float64
+	hasWeeklyPct           bool
+	weeklyPct              float64
+	hasUsableFiveHourReset bool
+	fiveHourReset          time.Time
+}
+
+func canUseCodexQuotaScoreSelection(provider string, auths []*Auth) bool {
+	providerKey := strings.ToLower(strings.TrimSpace(provider))
+	if providerKey != "codex" && providerKey != "mixed" {
+		return false
+	}
+	if len(auths) == 0 {
+		return false
+	}
+	for _, auth := range auths {
+		if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+			return false
+		}
+	}
+	return true
+}
+
+func pickBestCodexQuotaScoreAuth(auths []*Auth, now time.Time) *Auth {
+	if len(auths) == 0 {
+		return nil
+	}
+	snapshots := make([]codexQuotaScoreSnapshot, 0, len(auths))
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		snapshots = append(snapshots, codexQuotaScoreSnapshotForAuth(auth, now))
+	}
+	if len(snapshots) == 0 {
+		return nil
+	}
+	sort.Slice(snapshots, func(i, j int) bool {
+		return codexQuotaScoreLess(snapshots[i], snapshots[j])
+	})
+	return snapshots[0].auth
+}
+
+func pickBestRetainableCodexQuotaScoreAuth(auths []*Auth, now time.Time) *Auth {
+	filtered := make([]*Auth, 0, len(auths))
+	for _, auth := range auths {
+		if auth == nil || !codexStickyRetainable(auth, now) {
+			continue
+		}
+		filtered = append(filtered, auth)
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return pickBestCodexQuotaScoreAuth(filtered, now)
+}
+
+func pickStickyOrBestCodexQuotaScoreAuth(state *codexStickySelectionState, provider, model string, auths []*Auth, now time.Time) *Auth {
+	if len(auths) == 0 {
+		return nil
+	}
+	if state == nil {
+		state = globalCodexStickySelection
+	}
+	key := codexStickySelectionKey(provider, model)
+	if picked := state.pickRetained(key, auths, now); picked != nil {
+		return picked
+	}
+	picked := pickBestCodexQuotaScoreAuth(auths, now)
+	if picked == nil {
+		state.clear(key)
+		return nil
+	}
+	if codexStickyRetainable(picked, now) {
+		state.set(key, picked.ID)
+	} else {
+		state.clear(key)
+	}
+	return picked
+}
+
+func codexStickySelectionKey(provider, model string) string {
+	providerKey := strings.ToLower(strings.TrimSpace(provider))
+	if providerKey == "" {
+		providerKey = "codex"
+	}
+	return providerKey + ":" + canonicalModelKey(model)
+}
+
+func (s *codexStickySelectionState) pickRetained(key string, auths []*Auth, now time.Time) *Auth {
+	if s == nil {
+		return nil
+	}
+	providerKey := providerFromStickySelectionKey(key)
+	providerRoot := strings.SplitN(strings.TrimSpace(key), ":", 2)[0] + ":"
+	s.mu.Lock()
+	stickyID := s.byKey[key]
+	if strings.TrimSpace(stickyID) == "" {
+		stickyID = s.byKey[providerRoot]
+	}
+	s.mu.Unlock()
+	if strings.TrimSpace(stickyID) == "" {
+		return nil
+	}
+	for _, auth := range auths {
+		if auth == nil || auth.ID != stickyID {
+			continue
+		}
+		if codexStickyRetainable(auth, now) {
+			if providerKey != "" {
+				s.mu.Lock()
+				if s.byProvider == nil {
+					s.byProvider = map[string]string{}
+				}
+				s.byProvider[providerKey] = auth.ID
+				s.mu.Unlock()
+			}
+			return auth
+		}
+		break
+	}
+	s.clear(key)
+	return nil
+}
+
+func (s *codexStickySelectionState) set(key, authID string) {
+	if s == nil || strings.TrimSpace(key) == "" || strings.TrimSpace(authID) == "" {
+		return
+	}
+	providerKey := providerFromStickySelectionKey(key)
+	s.mu.Lock()
+	if s.byKey == nil {
+		s.byKey = map[string]string{}
+	}
+	if s.byProvider == nil {
+		s.byProvider = map[string]string{}
+	}
+	s.byKey[key] = authID
+	if providerKey != "" {
+		s.byProvider[providerKey] = authID
+	}
+	s.mu.Unlock()
+}
+
+func (s *codexStickySelectionState) clearProvider(provider string) {
+	if s == nil {
+		return
+	}
+	providerKey := strings.ToLower(strings.TrimSpace(provider))
+	if providerKey == "" {
+		return
+	}
+	prefix := providerKey + ":"
+	s.mu.Lock()
+	for key := range s.byKey {
+		if strings.HasPrefix(key, prefix) {
+			delete(s.byKey, key)
+		}
+	}
+	delete(s.byProvider, providerKey)
+	s.mu.Unlock()
+}
+
+func (s *codexStickySelectionState) clearAuth(authID string) {
+	if s == nil || strings.TrimSpace(authID) == "" {
+		return
+	}
+	targetAuthID := strings.TrimSpace(authID)
+	s.mu.Lock()
+	for key, existingAuthID := range s.byKey {
+		if strings.TrimSpace(existingAuthID) == targetAuthID {
+			delete(s.byKey, key)
+		}
+	}
+	for providerKey, existingAuthID := range s.byProvider {
+		if strings.TrimSpace(existingAuthID) == targetAuthID {
+			delete(s.byProvider, providerKey)
+		}
+	}
+	s.mu.Unlock()
+}
+
+func (s *codexStickySelectionState) clear(key string) {
+	if s == nil || strings.TrimSpace(key) == "" {
+		return
+	}
+	providerKey := providerFromStickySelectionKey(key)
+	s.mu.Lock()
+	clearedAuthID := strings.TrimSpace(s.byKey[key])
+	delete(s.byKey, key)
+	if providerKey != "" && strings.TrimSpace(s.byProvider[providerKey]) == clearedAuthID {
+		providerRoot := providerKey + ":"
+		next := strings.TrimSpace(s.byKey[providerRoot])
+		if next == "" {
+			for existingKey, authID := range s.byKey {
+				if strings.HasPrefix(existingKey, providerRoot) && strings.TrimSpace(authID) != "" {
+					next = strings.TrimSpace(authID)
+					break
+				}
+			}
+		}
+		if next == "" {
+			delete(s.byProvider, providerKey)
+		} else {
+			s.byProvider[providerKey] = next
+		}
+	}
+	s.mu.Unlock()
+}
+
+func (s *codexStickySelectionState) currentAuthIDForProvider(provider string) string {
+	if s == nil {
+		return ""
+	}
+	providerKey := strings.ToLower(strings.TrimSpace(provider))
+	if providerKey == "" {
+		providerKey = "codex"
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return strings.TrimSpace(s.byProvider[providerKey])
+}
+
+func providerFromStickySelectionKey(key string) string {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return ""
+	}
+	parts := strings.SplitN(key, ":", 2)
+	return strings.ToLower(strings.TrimSpace(parts[0]))
+}
+
+func CurrentCodexStickyAuthID() string {
+	return globalCodexStickySelection.currentAuthIDForProvider("codex")
+}
+
+func ReleaseCodexStickyAuth(authID string) {
+	globalCodexStickySelection.clearAuth(authID)
+}
+
+func RecalculateCurrentCodexStickyAuth(auths []*Auth, now time.Time) *Auth {
+	key := codexStickySelectionKey("codex", "")
+	globalCodexStickySelection.clearProvider("codex")
+	filtered := make([]*Auth, 0, len(auths))
+	for _, auth := range auths {
+		if auth == nil || !IsCodexOAuthLikeAuth(auth) {
+			continue
+		}
+		filtered = append(filtered, auth)
+	}
+	picked := pickBestRetainableCodexQuotaScoreAuth(filtered, now)
+	if picked == nil {
+		return nil
+	}
+	globalCodexStickySelection.set(key, picked.ID)
+	return picked
+}
+
+func codexStickyRetainable(auth *Auth, now time.Time) bool {
+	if auth == nil || !IsCodexOAuthLikeAuth(auth) {
+		return false
+	}
+	if blocked, _, _ := isAuthBlockedForModel(auth, "", now); blocked {
+		return false
+	}
+	quota, ok := auth.GetCodexQuotaState()
+	if !ok || !codexQuotaRefreshStateUsable(quota, now) {
+		return false
+	}
+	if quota.FiveHour.Remaining == nil {
+		return false
+	}
+	return *quota.FiveHour.Remaining > 0
+}
+
+func codexQuotaScoreSnapshotForAuth(auth *Auth, now time.Time) codexQuotaScoreSnapshot {
+	snapshot := codexQuotaScoreSnapshot{auth: auth}
+	if auth == nil {
+		return snapshot
+	}
+	explanation := BuildCodexScoreExplanation(auth, now)
+	quota, ok := auth.GetCodexQuotaState()
+	if !ok {
+		return snapshot
+	}
+	if explanation.WeeklyRemaining != nil {
+		snapshot.hasWeeklyRemaining = true
+		snapshot.weeklyRemaining = *explanation.WeeklyRemaining
+	}
+	if explanation.WeeklyRemaining != nil && explanation.WeeklyLimit != nil && *explanation.WeeklyLimit > 0 {
+		snapshot.hasWeeklyPct = true
+		snapshot.weeklyPct = *explanation.WeeklyRemaining / *explanation.WeeklyLimit
+	}
+	if quota.FiveHour.ResetAt != nil && quota.FiveHour.ResetAt.After(now) {
+		snapshot.hasUsableFiveHourReset = true
+		snapshot.fiveHourReset = quota.FiveHour.ResetAt.UTC()
+	}
+	if explanation.ScoreAvailable && explanation.ComputedScoreLive != nil {
+		snapshot.finalScore = *explanation.ComputedScoreLive
+		snapshot.hasKnownScore = true
+	}
+	return snapshot
+}
+
+func codexQuotaRefreshStateUsable(quota CodexQuotaState, now time.Time) bool {
+	if quota.LastRefreshAt == nil || quota.LastRefreshAt.IsZero() {
+		return false
+	}
+	if quota.LastRefreshAt.Before(now.Add(-codexQuotaScoreFreshnessWindow)) {
+		return false
+	}
+	status := strings.ToLower(strings.TrimSpace(quota.RefreshStatus))
+	switch status {
+	case "", "ok", "success", "fresh":
+		return true
+	default:
+		return false
+	}
+}
+
+func codexQuotaScoreLess(left, right codexQuotaScoreSnapshot) bool {
+	if left.hasKnownScore != right.hasKnownScore {
+		return left.hasKnownScore
+	}
+	if left.hasKnownScore && right.hasKnownScore && left.finalScore != right.finalScore {
+		return left.finalScore > right.finalScore
+	}
+	if left.hasWeeklyRemaining != right.hasWeeklyRemaining {
+		return left.hasWeeklyRemaining
+	}
+	if left.hasWeeklyRemaining && right.hasWeeklyRemaining && left.weeklyRemaining != right.weeklyRemaining {
+		return left.weeklyRemaining > right.weeklyRemaining
+	}
+	if left.hasWeeklyPct != right.hasWeeklyPct {
+		return left.hasWeeklyPct
+	}
+	if left.hasWeeklyPct && right.hasWeeklyPct && left.weeklyPct != right.weeklyPct {
+		return left.weeklyPct > right.weeklyPct
+	}
+	if left.hasUsableFiveHourReset != right.hasUsableFiveHourReset {
+		return left.hasUsableFiveHourReset
+	}
+	if left.hasUsableFiveHourReset && right.hasUsableFiveHourReset && !left.fiveHourReset.Equal(right.fiveHourReset) {
+		return left.fiveHourReset.Before(right.fiveHourReset)
+	}
+	leftID := ""
+	rightID := ""
+	if left.auth != nil {
+		leftID = left.auth.ID
+	}
+	if right.auth != nil {
+		rightID = right.auth.ID
+	}
+	return leftID < rightID
 }
 
 func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, blockReason, time.Time) {

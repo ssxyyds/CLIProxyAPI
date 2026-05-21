@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -108,6 +109,56 @@ func TestNextRefreshCheckAt_PreferredInterval_PicksEarliestCandidate(t *testing.
 	want := expiry.Add(-15 * time.Minute)
 	if !got.Equal(want) {
 		t.Fatalf("nextRefreshCheckAt() = %s, want %s", got, want)
+	}
+}
+
+func TestNextRefreshCheckAt_CodexPreferredIntervalAddsStableJitter(t *testing.T) {
+	now := time.Date(2026, 4, 12, 0, 0, 0, 0, time.UTC)
+	auth := &Auth{
+		ID:              "codex-auth-1",
+		Provider:        "codex",
+		LastRefreshedAt: now,
+		Metadata: map[string]any{
+			"email":                    "x@example.com",
+			"refresh_interval_seconds": 900,
+		},
+	}
+
+	got, ok := nextRefreshCheckAt(now, auth, 15*time.Minute)
+	if !ok {
+		t.Fatalf("nextRefreshCheckAt() ok = false, want true")
+	}
+	jitter := codexRefreshJitter(auth.ID)
+	want := now.Add(15 * time.Minute).Add(jitter)
+	if !got.Equal(want) {
+		t.Fatalf("nextRefreshCheckAt() = %s, want %s", got, want)
+	}
+	if jitter < 0 || jitter >= codexRefreshJitterWindow {
+		t.Fatalf("codexRefreshJitter() = %s, want [0,%s)", jitter, codexRefreshJitterWindow)
+	}
+
+	gotAgain, ok := nextRefreshCheckAt(now, auth, 15*time.Minute)
+	if !ok || !gotAgain.Equal(got) {
+		t.Fatalf("nextRefreshCheckAt() not stable: got %s/%v then %s/%v", got, ok, gotAgain, ok)
+	}
+}
+
+func TestCodexRefreshGateDeduplicatesQueuedAuths(t *testing.T) {
+	gate := newCodexRefreshGate(1, time.Millisecond)
+	ctx := context.Background()
+
+	if !gate.submit(ctx, "auth-1") {
+		t.Fatal("first submit = false, want true")
+	}
+	if gate.submit(ctx, "auth-1") {
+		t.Fatal("second submit = true, want false while auth is pending")
+	}
+	if !gate.has("auth-1") {
+		t.Fatal("has(auth-1) = false, want true")
+	}
+	gate.forget("auth-1")
+	if gate.has("auth-1") {
+		t.Fatal("has(auth-1) = true after forget, want false")
 	}
 }
 

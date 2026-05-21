@@ -5,8 +5,6 @@ package cliproxy
 
 import (
 	"fmt"
-	"strings"
-	"time"
 
 	configaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
@@ -208,36 +206,7 @@ func (b *Builder) Build() (*Service, error) {
 			dirSetter.SetBaseDir(b.cfg.AuthDir)
 		}
 
-		strategy := ""
-		sessionAffinity := false
-		sessionAffinityTTL := time.Hour
-		if b.cfg != nil {
-			strategy = strings.ToLower(strings.TrimSpace(b.cfg.Routing.Strategy))
-			// Support both legacy ClaudeCodeSessionAffinity and new universal SessionAffinity
-			sessionAffinity = b.cfg.Routing.SessionAffinity
-			if ttlStr := strings.TrimSpace(b.cfg.Routing.SessionAffinityTTL); ttlStr != "" {
-				if parsed, err := time.ParseDuration(ttlStr); err == nil && parsed > 0 {
-					sessionAffinityTTL = parsed
-				}
-			}
-		}
-		var selector coreauth.Selector
-		switch strategy {
-		case "fill-first", "fillfirst", "ff":
-			selector = &coreauth.FillFirstSelector{}
-		default:
-			selector = &coreauth.RoundRobinSelector{}
-		}
-
-		// Wrap with session affinity if enabled (failover is always on)
-		if sessionAffinity {
-			selector = coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
-				Fallback: selector,
-				TTL:      sessionAffinityTTL,
-			})
-		}
-
-		coreManager = coreauth.NewManager(tokenStore, selector, nil)
+		coreManager = coreauth.NewManager(tokenStore, selectorFromRoutingConfig(b.cfg), nil)
 	}
 	// Attach a default RoundTripper provider so providers can opt-in per-auth transports.
 	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())

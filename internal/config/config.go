@@ -115,6 +115,9 @@ type Config struct {
 	// These are used only when the client does not send its own headers.
 	CodexHeaderDefaults CodexHeaderDefaults `yaml:"codex-header-defaults" json:"codex-header-defaults"`
 
+	// CodexQuotaProbe configures the small request used to verify Codex quota recovery.
+	CodexQuotaProbe CodexQuotaProbe `yaml:"codex-quota-probe" json:"codex-quota-probe"`
+
 	// ClaudeKey defines a list of Claude API key configurations as specified in the YAML configuration file.
 	ClaudeKey []ClaudeKey `yaml:"claude-api-key" json:"claude-api-key"`
 
@@ -224,7 +227,7 @@ type QuotaExceeded struct {
 // RoutingConfig configures how credentials are selected for requests.
 type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
-	// Supported values: "round-robin" (default), "fill-first".
+	// Supported values: "round-robin" (default), "fill-first", "codex-quota-score".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
 	// SessionAffinity enables universal session-sticky routing for all clients.

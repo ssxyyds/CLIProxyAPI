@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -220,7 +221,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 
 func isBuiltInSelector(selector Selector) bool {
 	switch selector.(type) {
-	case *RoundRobinSelector, *FillFirstSelector:
+	case *RoundRobinSelector, *FillFirstSelector, *CodexQuotaScoreSelector:
 		return true
 	default:
 		return false
@@ -950,6 +951,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			close(closedCh)
 			remaining = closedCh
 		}
+		if strings.EqualFold(provider, "codex") && ApplyCodexQuotaHeaderUpdate(auth, streamResult.Headers, time.Now().UTC()) {
+			_, _ = m.Update(ctx, auth)
+		}
 		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining), nil
 	}
 	if lastErr == nil {
@@ -1143,6 +1147,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 		auth.ID = uuid.NewString()
 	}
 	auth.EnsureIndex()
+	EnsureCodexQuotaRefreshMetadata(auth)
 	authClone := auth.Clone()
 	m.mu.Lock()
 	m.auths[auth.ID] = authClone
@@ -1162,6 +1167,7 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth == nil || auth.ID == "" {
 		return nil, nil
 	}
+	EnsureCodexQuotaRefreshMetadata(auth)
 	m.mu.Lock()
 	if existing, ok := m.auths[auth.ID]; ok && existing != nil {
 		if !auth.indexAssigned && auth.Index == "" {
@@ -1209,6 +1215,7 @@ func (m *Manager) Load(ctx context.Context) error {
 			continue
 		}
 		auth.EnsureIndex()
+		EnsureCodexQuotaRefreshMetadata(auth)
 		m.auths[auth.ID] = auth.Clone()
 	}
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
@@ -1411,6 +1418,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				continue
 			}
 			m.MarkResult(execCtx, result)
+			if strings.EqualFold(provider, "codex") && ApplyCodexQuotaHeaderUpdate(auth, resp.Headers, time.Now().UTC()) {
+				_, _ = m.Update(execCtx, auth)
+			}
 			return resp, nil
 		}
 		if authErr != nil {
@@ -1510,6 +1520,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				continue
 			}
 			m.MarkResult(execCtx, result)
+			if strings.EqualFold(provider, "codex") && ApplyCodexQuotaHeaderUpdate(auth, resp.Headers, time.Now().UTC()) {
+				_, _ = m.Update(execCtx, auth)
+			}
 			return resp, nil
 		}
 		if authErr != nil {
@@ -2879,6 +2892,50 @@ func (m *Manager) GetByID(id string) (*Auth, bool) {
 	return auth.Clone(), true
 }
 
+// RefreshNow refreshes a single auth entry immediately and persists the updated state.
+func (m *Manager) RefreshNow(ctx context.Context, id string) error {
+	if m == nil {
+		return fmt.Errorf("manager is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return fmt.Errorf("auth id is required")
+	}
+	m.mu.RLock()
+	auth := m.auths[id]
+	var exec ProviderExecutor
+	if auth != nil {
+		exec = m.executors[auth.Provider]
+	}
+	m.mu.RUnlock()
+	if auth == nil {
+		return fmt.Errorf("auth not found")
+	}
+	if exec == nil {
+		return fmt.Errorf("executor not registered for provider: %s", auth.Provider)
+	}
+	updated, err := exec.Refresh(ctx, auth.Clone())
+	if err != nil {
+		return err
+	}
+	if updated == nil {
+		updated = auth.Clone()
+	}
+	if updated.Runtime == nil {
+		updated.Runtime = auth.Runtime
+	}
+	now := time.Now()
+	updated.LastRefreshedAt = now
+	updated.NextRefreshAfter = time.Time{}
+	updated.LastError = nil
+	updated.UpdatedAt = now
+	_, err = m.Update(ctx, updated)
+	return err
+}
+
 // GetExecutionSessionAuthByID retrieves a Home runtime auth scoped to an execution session.
 func (m *Manager) GetExecutionSessionAuthByID(sessionID string, authID string) (*Auth, bool) {
 	sessionID = strings.TrimSpace(sessionID)
@@ -3920,6 +3977,16 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 	}
 	if !a.NextRefreshAfter.IsZero() && now.Before(a.NextRefreshAfter) {
 		return false
+	}
+	if IsCodexOAuthLikeAuth(a) {
+		lastRefresh := a.LastRefreshedAt
+		if lastRefresh.IsZero() {
+			if ts, ok := authLastRefreshTimestamp(a); ok {
+				lastRefresh = ts
+			}
+		}
+		batchStart := now.Truncate(CodexQuotaRefreshInterval)
+		return lastRefresh.IsZero() || lastRefresh.Before(batchStart)
 	}
 	if evaluator, ok := a.Runtime.(RefreshEvaluator); ok && evaluator != nil {
 		return evaluator.ShouldRefresh(now, a)

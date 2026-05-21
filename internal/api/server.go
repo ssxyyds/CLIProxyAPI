@@ -668,6 +668,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/codex-api-key", s.mgmt.PutCodexKeys)
 		mgmt.PATCH("/codex-api-key", s.mgmt.PatchCodexKey)
 		mgmt.DELETE("/codex-api-key", s.mgmt.DeleteCodexKey)
+		mgmt.GET("/codex-state", s.mgmt.GetCodexState)
+		mgmt.PATCH("/codex-state/manual-score", s.mgmt.PatchCodexStateManualScore)
+		mgmt.POST("/codex-state/refresh", s.mgmt.PostCodexStateRefresh)
+		mgmt.POST("/codex-state/recalc", s.mgmt.PostCodexStateRecalc)
 
 		mgmt.GET("/openai-compatibility", s.mgmt.GetOpenAICompat)
 		mgmt.PUT("/openai-compatibility", s.mgmt.PutOpenAICompat)

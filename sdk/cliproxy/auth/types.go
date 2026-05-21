@@ -230,7 +230,7 @@ func (a *Auth) Clone() *Auth {
 	if len(a.Metadata) > 0 {
 		copyAuth.Metadata = make(map[string]any, len(a.Metadata))
 		for key, value := range a.Metadata {
-			copyAuth.Metadata[key] = value
+			copyAuth.Metadata[key] = deepCloneAny(value)
 		}
 	}
 	if len(a.ModelStates) > 0 {
@@ -648,7 +648,13 @@ func parseTimeValue(v any) (time.Time, bool) {
 		if unix, err := strconv.ParseInt(s, 10, 64); err == nil {
 			return normaliseUnix(unix), true
 		}
+	case int:
+		return normaliseUnix(int64(value)), true
+	case int32:
+		return normaliseUnix(int64(value)), true
 	case float64:
+		return normaliseUnix(int64(value)), true
+	case float32:
 		return normaliseUnix(int64(value)), true
 	case int64:
 		return normaliseUnix(value), true
@@ -672,4 +678,49 @@ func normaliseUnix(raw int64) time.Time {
 		return time.UnixMilli(raw)
 	}
 	return time.Unix(raw, 0)
+}
+
+func deepCloneAny(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		cloned := make(map[string]any, len(typed))
+		for k, v := range typed {
+			cloned[k] = deepCloneAny(v)
+		}
+		return cloned
+	case []any:
+		cloned := make([]any, len(typed))
+		for i, v := range typed {
+			cloned[i] = deepCloneAny(v)
+		}
+		return cloned
+	case map[string]string:
+		cloned := make(map[string]string, len(typed))
+		for k, v := range typed {
+			cloned[k] = v
+		}
+		return cloned
+	case []string:
+		cloned := make([]string, len(typed))
+		copy(cloned, typed)
+		return cloned
+	case CodexQuotaState:
+		return typed.clone()
+	case *CodexQuotaState:
+		if typed == nil {
+			return (*CodexQuotaState)(nil)
+		}
+		cloned := typed.clone()
+		return &cloned
+	case CodexQuotaBucket:
+		return typed.clone()
+	case *CodexQuotaBucket:
+		if typed == nil {
+			return (*CodexQuotaBucket)(nil)
+		}
+		cloned := typed.clone()
+		return &cloned
+	default:
+		return value
+	}
 }

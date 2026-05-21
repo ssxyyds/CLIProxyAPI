@@ -487,7 +487,7 @@ func (s *Service) applyConfigUpdate(newCfg *config.Config) {
 	var previousSessionAffinityTTL string
 	s.cfgMu.RLock()
 	if s.cfg != nil {
-		previousStrategy = strings.ToLower(strings.TrimSpace(s.cfg.Routing.Strategy))
+		previousStrategy = config.NormalizeRoutingStrategy(s.cfg.Routing.Strategy)
 		previousSessionAffinity = s.cfg.Routing.SessionAffinity
 		previousSessionAffinityTTL = s.cfg.Routing.SessionAffinityTTL
 	}
@@ -502,17 +502,7 @@ func (s *Service) applyConfigUpdate(newCfg *config.Config) {
 		return
 	}
 
-	nextStrategy := strings.ToLower(strings.TrimSpace(newCfg.Routing.Strategy))
-	normalizeStrategy := func(strategy string) string {
-		switch strategy {
-		case "fill-first", "fillfirst", "ff":
-			return "fill-first"
-		default:
-			return "round-robin"
-		}
-	}
-	previousStrategy = normalizeStrategy(previousStrategy)
-	nextStrategy = normalizeStrategy(nextStrategy)
+	nextStrategy := config.NormalizeRoutingStrategy(newCfg.Routing.Strategy)
 
 	nextSessionAffinity := newCfg.Routing.SessionAffinity
 	nextSessionAffinityTTL := newCfg.Routing.SessionAffinityTTL
@@ -522,28 +512,7 @@ func (s *Service) applyConfigUpdate(newCfg *config.Config) {
 		previousSessionAffinityTTL != nextSessionAffinityTTL
 
 	if s.coreManager != nil && selectorChanged {
-		var selector coreauth.Selector
-		switch nextStrategy {
-		case "fill-first":
-			selector = &coreauth.FillFirstSelector{}
-		default:
-			selector = &coreauth.RoundRobinSelector{}
-		}
-
-		if nextSessionAffinity {
-			ttl := time.Hour
-			if ttlStr := strings.TrimSpace(nextSessionAffinityTTL); ttlStr != "" {
-				if parsed, err := time.ParseDuration(ttlStr); err == nil && parsed > 0 {
-					ttl = parsed
-				}
-			}
-			selector = coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
-				Fallback: selector,
-				TTL:      ttl,
-			})
-		}
-
-		s.coreManager.SetSelector(selector)
+		s.coreManager.SetSelector(selectorFromRoutingConfig(newCfg))
 	}
 
 	s.applyRetryConfig(newCfg)

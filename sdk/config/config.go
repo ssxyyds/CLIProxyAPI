@@ -13,6 +13,7 @@ type Config = internalconfig.Config
 type StreamingConfig = internalconfig.StreamingConfig
 type TLSConfig = internalconfig.TLSConfig
 type RemoteManagement = internalconfig.RemoteManagement
+type RoutingConfig = internalconfig.RoutingConfig
 type AmpCode = internalconfig.AmpCode
 type OAuthModelAlias = internalconfig.OAuthModelAlias
 type PayloadConfig = internalconfig.PayloadConfig
@@ -42,6 +43,10 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 }
 
 func ParseConfigBytes(data []byte) (*Config, error) { return internalconfig.ParseConfigBytes(data) }
+
+func NormalizeRoutingStrategy(strategy string) string {
+	return internalconfig.NormalizeRoutingStrategy(strategy)
+}
 
 func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	return internalconfig.SaveConfigPreserveComments(configFile, cfg)

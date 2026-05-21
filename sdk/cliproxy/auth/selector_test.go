@@ -36,6 +36,31 @@ func TestFillFirstSelectorPick_Deterministic(t *testing.T) {
 	}
 }
 
+func TestCodexQuotaScoreSelectorFallbackUsesFillFirst(t *testing.T) {
+	t.Parallel()
+
+	selector := &CodexQuotaScoreSelector{}
+	auths := []*Auth{
+		{ID: "b", Provider: "gemini"},
+		{ID: "a", Provider: "gemini"},
+	}
+
+	first, err := selector.Pick(context.Background(), "gemini", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() first error = %v", err)
+	}
+	second, err := selector.Pick(context.Background(), "gemini", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() second error = %v", err)
+	}
+	if first == nil || second == nil {
+		t.Fatalf("Pick() returned nil auths: first=%#v second=%#v", first, second)
+	}
+	if first.ID != "a" || second.ID != "a" {
+		t.Fatalf("fallback picks = %q, %q; want fill-first auth %q both times", first.ID, second.ID, "a")
+	}
+}
+
 func TestRoundRobinSelectorPick_CyclesDeterministic(t *testing.T) {
 	t.Parallel()
 

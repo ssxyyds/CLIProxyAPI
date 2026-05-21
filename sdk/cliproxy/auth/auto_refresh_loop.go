@@ -14,6 +14,7 @@ type authAutoRefreshLoop struct {
 	manager     *Manager
 	interval    time.Duration
 	concurrency int
+	codexGate   *codexRefreshGate
 
 	mu    sync.Mutex
 	queue refreshMinHeap
@@ -39,6 +40,7 @@ func newAuthAutoRefreshLoop(manager *Manager, interval time.Duration, concurrenc
 		manager:     manager,
 		interval:    interval,
 		concurrency: concurrency,
+		codexGate:   newCodexRefreshGate(codexRefreshGateConcurrency, codexRefreshMinInterval),
 		index:       make(map[string]*refreshHeapItem),
 		dirty:       make(map[string]struct{}),
 		wakeCh:      make(chan struct{}, 1),
@@ -70,6 +72,9 @@ func (l *authAutoRefreshLoop) run(ctx context.Context) {
 	}
 	for i := 0; i < workers; i++ {
 		go l.worker(ctx)
+	}
+	if l.codexGate != nil {
+		l.codexGate.run(ctx, l.manager.refreshAuth, l.queueReschedule)
 	}
 
 	l.loop(ctx)
@@ -251,6 +256,12 @@ func (l *authAutoRefreshLoop) handleDueAuth(ctx context.Context, now time.Time, 
 		return
 	}
 
+	useCodexGate := IsCodexOAuthLikeAuth(auth) && l.codexGate != nil
+	if useCodexGate && l.codexGate.has(authID) {
+		l.upsert(authID, now.Add(l.interval))
+		return
+	}
+
 	if !manager.markRefreshPending(authID, now) {
 		manager.mu.RLock()
 		auth = manager.auths[authID]
@@ -264,9 +275,12 @@ func (l *authAutoRefreshLoop) handleDueAuth(ctx context.Context, now time.Time, 
 		return
 	}
 
+	if useCodexGate {
+		_ = l.codexGate.submit(ctx, authID)
+		return
+	}
 	select {
 	case <-ctx.Done():
-		return
 	case l.jobs <- authID:
 	}
 }
@@ -370,6 +384,7 @@ func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time
 
 	if pref := authPreferredInterval(auth); pref > 0 {
 		candidates := make([]time.Time, 0, 2)
+		isCodexOAuth := IsCodexOAuthLikeAuth(auth)
 		if hasExpiry && !expiry.IsZero() {
 			if !expiry.After(now) || expiry.Sub(now) <= pref {
 				return now, true
@@ -377,9 +392,16 @@ func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time
 			candidates = append(candidates, expiry.Add(-pref))
 		}
 		if lastRefresh.IsZero() {
+			if isCodexOAuth {
+				return now.Add(codexRefreshJitter(auth.ID)), true
+			}
 			return now, true
 		}
-		candidates = append(candidates, lastRefresh.Add(pref))
+		nextByInterval := lastRefresh.Add(pref)
+		if isCodexOAuth {
+			nextByInterval = nextByInterval.Add(codexRefreshJitter(auth.ID))
+		}
+		candidates = append(candidates, nextByInterval)
 		next := candidates[0]
 		for _, candidate := range candidates[1:] {
 			if candidate.Before(next) {
