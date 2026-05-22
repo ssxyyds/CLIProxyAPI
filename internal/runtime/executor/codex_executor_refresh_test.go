@@ -297,6 +297,59 @@ func TestCodexExecutorRefresh_UsesWindowDurationToClassifyPrimaryWindow(t *testi
 	}
 }
 
+func TestCodexExecutorRefresh_ClearsImpossibleCachedFiveHourWhenUsageOnlyReturnsWeekly(t *testing.T) {
+	t.Parallel()
+
+	weeklyReset := time.Now().Add(2 * 24 * time.Hour).UTC().Truncate(time.Second)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/backend-api/codex/usage":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"rate_limit":{"primary_window":{"used_percent":44,"limit_window_seconds":604800,"reset_at":"` + weeklyReset.Format(time.RFC3339) + `"},"secondary_window":null}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{
+			"email":        "user@example.com",
+			"access_token": "token-123",
+		},
+		Attributes: map[string]string{
+			"base_url": server.URL + "/backend-api/codex",
+		},
+	}
+	auth.SetCodexQuotaState(cliproxyauth.CodexQuotaState{
+		FiveHour: cliproxyauth.CodexQuotaBucket{
+			Remaining: float64Ptr(56),
+			Limit:     float64Ptr(100),
+			ResetAt:   &weeklyReset,
+		},
+	})
+
+	updated, err := executor.Refresh(context.Background(), auth)
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	quota, ok := updated.GetCodexQuotaState()
+	if !ok {
+		t.Fatal("GetCodexQuotaState() ok = false, want true")
+	}
+	if codexQuotaBucketHasData(quota.FiveHour) {
+		t.Fatalf("FiveHour = %#v, want cleared because reset is outside the five-hour window", quota.FiveHour)
+	}
+	if quota.Weekly.Remaining == nil || *quota.Weekly.Remaining != 56 {
+		t.Fatalf("Weekly.Remaining = %#v, want 56 from weekly primary window", quota.Weekly.Remaining)
+	}
+	if quota.Weekly.ResetAt == nil || !quota.Weekly.ResetAt.Equal(weeklyReset) {
+		t.Fatalf("Weekly.ResetAt = %v, want %v", quota.Weekly.ResetAt, weeklyReset)
+	}
+}
+
 func TestCodexExecutorRefresh_DoesNotBootstrapProbeWhenWeeklyKnownAndFiveHourMissing(t *testing.T) {
 	t.Parallel()
 

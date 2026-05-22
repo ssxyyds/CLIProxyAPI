@@ -240,6 +240,9 @@ func (e *CodexExecutor) refreshCodexQuotaState(ctx context.Context, auth *clipro
 		if codexQuotaBucketHasData(payload.state.Weekly) {
 			merged.Weekly = payload.state.Weekly
 		}
+		if !codexQuotaBucketHasData(payload.state.FiveHour) && codexQuotaFiveHourResetOutsideWindow(merged.FiveHour, now) {
+			merged.FiveHour = cliproxyauth.CodexQuotaBucket{}
+		}
 		if payload.blockedUntil != nil && !payload.blockedUntil.IsZero() {
 			until := payload.blockedUntil.UTC()
 			blockedUntil = &until
@@ -484,6 +487,13 @@ func codexQuotaBucketWindowKind(body []byte) string {
 
 func codexQuotaBucketHasData(bucket cliproxyauth.CodexQuotaBucket) bool {
 	return bucket.Remaining != nil || bucket.Limit != nil || bucket.ResetAt != nil
+}
+
+func codexQuotaFiveHourResetOutsideWindow(bucket cliproxyauth.CodexQuotaBucket, now time.Time) bool {
+	if bucket.ResetAt == nil || bucket.ResetAt.IsZero() {
+		return false
+	}
+	return bucket.ResetAt.UTC().After(now.UTC().Add(6 * time.Hour))
 }
 
 func cloneCodexQuotaState(state cliproxyauth.CodexQuotaState) cliproxyauth.CodexQuotaState {

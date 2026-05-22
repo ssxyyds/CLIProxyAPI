@@ -624,25 +624,6 @@ func extractCodexQuotaHeaderUpdate(headers http.Header, now time.Time) codexQuot
 		if value == "" {
 			continue
 		}
-		if strings.HasPrefix(name, "x-codex-primary-") || strings.HasPrefix(name, "x-codex-secondary-") {
-			bucket := &update.FiveHour
-			if strings.HasPrefix(name, "x-codex-secondary-") {
-				bucket = &update.Weekly
-			}
-			switch {
-			case strings.HasSuffix(name, "used-percent"):
-				if used, ok := parseHeaderNumber(value); ok {
-					remaining := math.Max(0, 100-used)
-					bucket.Limit = float64Ptr(100)
-					bucket.Remaining = float64Ptr(remaining)
-				}
-			case strings.HasSuffix(name, "reset-at"):
-				if ts, ok := parseHeaderTimestamp(value, now); ok {
-					bucket.ResetAt = &ts
-				}
-			}
-			continue
-		}
 		if strings.HasPrefix(name, "x-ratelimit-") {
 			var bucket *CodexQuotaBucket
 			switch {
@@ -655,10 +636,6 @@ func extractCodexQuotaHeaderUpdate(headers http.Header, now time.Time) codexQuot
 				continue
 			}
 			switch {
-			case strings.Contains(name, "limit"):
-				if n, ok := parseHeaderNumber(value); ok {
-					bucket.Limit = float64Ptr(n)
-				}
 			case strings.Contains(name, "remaining"):
 				if n, ok := parseHeaderNumber(value); ok {
 					bucket.Remaining = float64Ptr(n)
@@ -666,6 +643,10 @@ func extractCodexQuotaHeaderUpdate(headers http.Header, now time.Time) codexQuot
 			case strings.Contains(name, "reset"):
 				if ts, ok := parseHeaderTimestamp(value, now); ok {
 					bucket.ResetAt = &ts
+				}
+			case strings.Contains(name, "limit"):
+				if n, ok := parseHeaderNumber(value); ok {
+					bucket.Limit = float64Ptr(n)
 				}
 			}
 			continue

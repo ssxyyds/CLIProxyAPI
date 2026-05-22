@@ -298,10 +298,12 @@ func TestApplyCodexQuotaHeaderUpdate_ParsesResponseHeaders(t *testing.T) {
 	now := time.Date(2026, 5, 15, 3, 0, 0, 0, time.UTC)
 	a := &Auth{Provider: "codex", Metadata: map[string]any{"email": "user@example.com"}}
 	headers := http.Header{}
-	headers.Set("x-codex-primary-used-percent", "40")
-	headers.Set("x-codex-primary-reset-at", "2026-05-15T05:00:00Z")
-	headers.Set("x-codex-secondary-used-percent", "10")
-	headers.Set("x-codex-secondary-reset-at", "2026-05-21T05:00:00Z")
+	headers.Set("x-ratelimit-5h-remaining", "60")
+	headers.Set("x-ratelimit-5h-limit", "100")
+	headers.Set("x-ratelimit-5h-reset", "2026-05-15T05:00:00Z")
+	headers.Set("x-ratelimit-weekly-remaining", "90")
+	headers.Set("x-ratelimit-weekly-limit", "100")
+	headers.Set("x-ratelimit-weekly-reset", "2026-05-21T05:00:00Z")
 	headers.Set("retry-after", "120")
 	if !ApplyCodexQuotaHeaderUpdate(a, headers, now) {
 		t.Fatal("ApplyCodexQuotaHeaderUpdate() = false, want true")
@@ -317,6 +319,33 @@ func TestApplyCodexQuotaHeaderUpdate_ParsesResponseHeaders(t *testing.T) {
 	if !a.Unavailable || a.Quota.NextRecoverAt.IsZero() {
 		t.Fatalf("expected retry-after to propagate cooldown, got unavailable=%v quota=%#v", a.Unavailable, a.Quota)
 	}
+}
+
+func TestApplyCodexQuotaHeaderUpdate_IgnoresAmbiguousPrimarySecondaryHeaders(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 15, 3, 0, 0, 0, time.UTC)
+	weeklyReset := now.Add(7 * 24 * time.Hour)
+	fiveHourReset := now.Add(5 * time.Hour)
+	a := &Auth{Provider: "codex", Metadata: map[string]any{"email": "user@example.com"}}
+	a.SetCodexQuotaState(CodexQuotaState{
+		FiveHour: CodexQuotaBucket{Remaining: float64Ptr(20), Limit: float64Ptr(40), ResetAt: &fiveHourReset},
+		Weekly:   CodexQuotaBucket{Remaining: float64Ptr(80), Limit: float64Ptr(100), ResetAt: &weeklyReset},
+	})
+	headers := http.Header{}
+	headers.Set("x-codex-primary-used-percent", "44")
+	headers.Set("x-codex-primary-reset-at", weeklyReset.Format(time.RFC3339))
+	headers.Set("x-codex-secondary-used-percent", "0")
+	if ApplyCodexQuotaHeaderUpdate(a, headers, now) {
+		t.Fatal("ApplyCodexQuotaHeaderUpdate() = true, want false for ambiguous primary/secondary quota headers")
+	}
+	quota, ok := a.GetCodexQuotaState()
+	if !ok {
+		t.Fatal("GetCodexQuotaState() ok = false, want true")
+	}
+	assertFloatPtr(t, quota.FiveHour.Remaining, 20)
+	assertTimePtr(t, quota.FiveHour.ResetAt, fiveHourReset)
+	assertFloatPtr(t, quota.Weekly.Remaining, 80)
+	assertTimePtr(t, quota.Weekly.ResetAt, weeklyReset)
 }
 
 func TestApplyCodexQuotaBlockedUntil_UpdatesAndClearsCooldownState(t *testing.T) {
