@@ -29,16 +29,23 @@ type CodexQuotaBucket struct {
 }
 
 type CodexQuotaState struct {
-	FiveHour        CodexQuotaBucket `json:"five_hour,omitempty"`
-	Weekly          CodexQuotaBucket `json:"weekly,omitempty"`
-	LastRefreshAt   *time.Time       `json:"last_refresh_at,omitempty"`
-	RefreshStatus   string           `json:"refresh_status,omitempty"`
-	RefreshError    string           `json:"refresh_error,omitempty"`
-	ProbeResetAt    *time.Time       `json:"probe_reset_at,omitempty"`
-	ProbeAt         *time.Time       `json:"probe_at,omitempty"`
-	ProbeVerifiedAt *time.Time       `json:"probe_verified_at,omitempty"`
-	ProbeStatus     string           `json:"probe_status,omitempty"`
-	ProbeError      string           `json:"probe_error,omitempty"`
+	FiveHour            CodexQuotaBucket `json:"five_hour,omitempty"`
+	Weekly              CodexQuotaBucket `json:"weekly,omitempty"`
+	LastRefreshAt       *time.Time       `json:"last_refresh_at,omitempty"`
+	RefreshStatus       string           `json:"refresh_status,omitempty"`
+	RefreshError        string           `json:"refresh_error,omitempty"`
+	ProbeResetAt        *time.Time       `json:"probe_reset_at,omitempty"`
+	ProbeAt             *time.Time       `json:"probe_at,omitempty"`
+	ProbeVerifiedAt     *time.Time       `json:"probe_verified_at,omitempty"`
+	ProbeStatus         string           `json:"probe_status,omitempty"`
+	ProbeError          string           `json:"probe_error,omitempty"`
+	BootstrapProbeAt    *time.Time       `json:"bootstrap_probe_at,omitempty"`
+	BootstrapVerifiedAt *time.Time       `json:"bootstrap_verified_at,omitempty"`
+	BootstrapNextAfter  *time.Time       `json:"bootstrap_next_after,omitempty"`
+	BootstrapStatus     string           `json:"bootstrap_status,omitempty"`
+	BootstrapError      string           `json:"bootstrap_error,omitempty"`
+	BootstrapReason     string           `json:"bootstrap_reason,omitempty"`
+	BootstrapAttempts   int              `json:"bootstrap_attempts,omitempty"`
 }
 
 func (b CodexQuotaBucket) clone() CodexQuotaBucket {
@@ -58,12 +65,16 @@ func (b CodexQuotaBucket) clone() CodexQuotaBucket {
 
 func (s CodexQuotaState) clone() CodexQuotaState {
 	cloned := CodexQuotaState{
-		FiveHour:      s.FiveHour.clone(),
-		Weekly:        s.Weekly.clone(),
-		RefreshStatus: s.RefreshStatus,
-		RefreshError:  s.RefreshError,
-		ProbeStatus:   s.ProbeStatus,
-		ProbeError:    s.ProbeError,
+		FiveHour:          s.FiveHour.clone(),
+		Weekly:            s.Weekly.clone(),
+		RefreshStatus:     s.RefreshStatus,
+		RefreshError:      s.RefreshError,
+		ProbeStatus:       s.ProbeStatus,
+		ProbeError:        s.ProbeError,
+		BootstrapStatus:   s.BootstrapStatus,
+		BootstrapError:    s.BootstrapError,
+		BootstrapReason:   s.BootstrapReason,
+		BootstrapAttempts: s.BootstrapAttempts,
 	}
 	if s.LastRefreshAt != nil {
 		lastRefresh := s.LastRefreshAt.UTC()
@@ -80,6 +91,18 @@ func (s CodexQuotaState) clone() CodexQuotaState {
 	if s.ProbeVerifiedAt != nil {
 		probeVerifiedAt := s.ProbeVerifiedAt.UTC()
 		cloned.ProbeVerifiedAt = &probeVerifiedAt
+	}
+	if s.BootstrapProbeAt != nil {
+		bootstrapProbeAt := s.BootstrapProbeAt.UTC()
+		cloned.BootstrapProbeAt = &bootstrapProbeAt
+	}
+	if s.BootstrapVerifiedAt != nil {
+		bootstrapVerifiedAt := s.BootstrapVerifiedAt.UTC()
+		cloned.BootstrapVerifiedAt = &bootstrapVerifiedAt
+	}
+	if s.BootstrapNextAfter != nil {
+		bootstrapNextAfter := s.BootstrapNextAfter.UTC()
+		cloned.BootstrapNextAfter = &bootstrapNextAfter
 	}
 	return cloned
 }
@@ -290,6 +313,27 @@ func codexQuotaStateFromMap(raw map[string]any) (CodexQuotaState, bool) {
 	if probeErr, ok := raw["probe_error"].(string); ok {
 		state.ProbeError = strings.TrimSpace(probeErr)
 	}
+	if ts, ok := parseTimeValue(raw["bootstrap_probe_at"]); ok && !ts.IsZero() {
+		state.BootstrapProbeAt = &ts
+	}
+	if ts, ok := parseTimeValue(raw["bootstrap_verified_at"]); ok && !ts.IsZero() {
+		state.BootstrapVerifiedAt = &ts
+	}
+	if ts, ok := parseTimeValue(raw["bootstrap_next_after"]); ok && !ts.IsZero() {
+		state.BootstrapNextAfter = &ts
+	}
+	if status, ok := raw["bootstrap_status"].(string); ok {
+		state.BootstrapStatus = strings.TrimSpace(status)
+	}
+	if bootstrapErr, ok := raw["bootstrap_error"].(string); ok {
+		state.BootstrapError = strings.TrimSpace(bootstrapErr)
+	}
+	if reason, ok := raw["bootstrap_reason"].(string); ok {
+		state.BootstrapReason = strings.TrimSpace(reason)
+	}
+	if attempts, ok := parseIntAny(raw["bootstrap_attempts"]); ok && attempts > 0 {
+		state.BootstrapAttempts = attempts
+	}
 	return state, state.hasData()
 }
 
@@ -333,7 +377,7 @@ func codexQuotaBucketFromMap(raw map[string]any) CodexQuotaBucket {
 }
 
 func (s CodexQuotaState) hasData() bool {
-	return s.FiveHour.hasData() || s.Weekly.hasData() || s.LastRefreshAt != nil || s.RefreshStatus != "" || s.RefreshError != "" || s.ProbeResetAt != nil || s.ProbeAt != nil || s.ProbeVerifiedAt != nil || s.ProbeStatus != "" || s.ProbeError != ""
+	return s.FiveHour.hasData() || s.Weekly.hasData() || s.LastRefreshAt != nil || s.RefreshStatus != "" || s.RefreshError != "" || s.ProbeResetAt != nil || s.ProbeAt != nil || s.ProbeVerifiedAt != nil || s.ProbeStatus != "" || s.ProbeError != "" || s.BootstrapProbeAt != nil || s.BootstrapVerifiedAt != nil || s.BootstrapNextAfter != nil || s.BootstrapStatus != "" || s.BootstrapError != "" || s.BootstrapReason != "" || s.BootstrapAttempts > 0
 }
 
 func (b CodexQuotaBucket) hasData() bool {
@@ -374,6 +418,27 @@ func (s CodexQuotaState) metadataValue() any {
 	}
 	if trimmed := strings.TrimSpace(s.ProbeError); trimmed != "" {
 		out["probe_error"] = trimmed
+	}
+	if s.BootstrapProbeAt != nil && !s.BootstrapProbeAt.IsZero() {
+		out["bootstrap_probe_at"] = s.BootstrapProbeAt.UTC().Format(time.RFC3339)
+	}
+	if s.BootstrapVerifiedAt != nil && !s.BootstrapVerifiedAt.IsZero() {
+		out["bootstrap_verified_at"] = s.BootstrapVerifiedAt.UTC().Format(time.RFC3339)
+	}
+	if s.BootstrapNextAfter != nil && !s.BootstrapNextAfter.IsZero() {
+		out["bootstrap_next_after"] = s.BootstrapNextAfter.UTC().Format(time.RFC3339)
+	}
+	if trimmed := strings.TrimSpace(s.BootstrapStatus); trimmed != "" {
+		out["bootstrap_status"] = trimmed
+	}
+	if trimmed := strings.TrimSpace(s.BootstrapError); trimmed != "" {
+		out["bootstrap_error"] = trimmed
+	}
+	if trimmed := strings.TrimSpace(s.BootstrapReason); trimmed != "" {
+		out["bootstrap_reason"] = trimmed
+	}
+	if s.BootstrapAttempts > 0 {
+		out["bootstrap_attempts"] = s.BootstrapAttempts
 	}
 	if len(out) == 0 {
 		return nil

@@ -393,6 +393,49 @@ func TestManagerCustomSelector_FallsBackToLegacyPath(t *testing.T) {
 	}
 }
 
+func TestManagerPickNext_CodexQuotaScoreUsesSelectorScore(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	lastRefresh := now.Add(-5 * time.Minute)
+	reset := now.Add(6 * time.Hour)
+	model := "gpt-5.4-mini"
+	registerSchedulerModels(t, "codex", model, "auth-a-low", "auth-z-high")
+
+	low := &Auth{ID: "auth-a-low", Provider: "codex", Metadata: map[string]any{"email": "low@example.com"}}
+	low.SetCodexQuotaState(CodexQuotaState{
+		Weekly:        CodexQuotaBucket{Remaining: float64Ptr(5), Limit: float64Ptr(100), ResetAt: &reset},
+		FiveHour:      CodexQuotaBucket{Remaining: float64Ptr(10), Limit: float64Ptr(40), ResetAt: &reset},
+		LastRefreshAt: &lastRefresh,
+		RefreshStatus: "ok",
+	})
+	high := &Auth{ID: "auth-z-high", Provider: "codex", Metadata: map[string]any{"email": "high@example.com"}}
+	high.SetCodexQuotaState(CodexQuotaState{
+		Weekly:        CodexQuotaBucket{Remaining: float64Ptr(90), Limit: float64Ptr(100), ResetAt: &reset},
+		FiveHour:      CodexQuotaBucket{Remaining: float64Ptr(10), Limit: float64Ptr(40), ResetAt: &reset},
+		LastRefreshAt: &lastRefresh,
+		RefreshStatus: "ok",
+	})
+
+	selector := &CodexQuotaScoreSelector{sticky: &codexStickySelectionState{byKey: map[string]string{}, byProvider: map[string]string{}}}
+	manager := NewManager(nil, selector, nil)
+	manager.executors["codex"] = schedulerTestExecutor{}
+	if _, errRegister := manager.Register(context.Background(), low); errRegister != nil {
+		t.Fatalf("Register(low) error = %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), high); errRegister != nil {
+		t.Fatalf("Register(high) error = %v", errRegister)
+	}
+
+	got, _, errPick := manager.pickNext(context.Background(), "codex", model, cliproxyexecutor.Options{}, map[string]struct{}{})
+	if errPick != nil {
+		t.Fatalf("pickNext() error = %v", errPick)
+	}
+	if got == nil || got.ID != "auth-z-high" {
+		t.Fatalf("pickNext() auth = %#v, want auth-z-high", got)
+	}
+}
+
 func TestManager_InitializesSchedulerForBuiltInSelector(t *testing.T) {
 	t.Parallel()
 

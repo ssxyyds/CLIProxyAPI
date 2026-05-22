@@ -82,6 +82,44 @@ func TestBuildCodexScoreExplanation_FallsBackToFiveHourWindow(t *testing.T) {
 	}
 }
 
+func TestBuildCodexScoreExplanation_FallsBackToFiveHourWhenWeeklyResetMissing(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC)
+	fiveHourReset := now.Add(2 * time.Hour)
+	lastRefresh := now.Add(-5 * time.Minute)
+	auth := &Auth{Provider: "codex", Metadata: map[string]any{"email": "oauth@example.com"}}
+	auth.SetCodexQuotaState(CodexQuotaState{
+		FiveHour: CodexQuotaBucket{
+			Remaining: float64Ptr(50),
+			Limit:     float64Ptr(100),
+			ResetAt:   &fiveHourReset,
+		},
+		Weekly: CodexQuotaBucket{
+			Remaining: float64Ptr(100),
+			Limit:     float64Ptr(100),
+		},
+		LastRefreshAt: &lastRefresh,
+		RefreshStatus: "ok",
+	})
+	auth.SetCodexManualScoreAdjustment(100)
+
+	explanation := BuildCodexScoreExplanation(auth, now)
+	if !explanation.ScoreAvailable {
+		t.Fatalf("ScoreAvailable = false, want true with five-hour fallback: %#v", explanation)
+	}
+	if explanation.DisqualifierReason != "" {
+		t.Fatalf("DisqualifierReason = %q, want empty", explanation.DisqualifierReason)
+	}
+	if explanation.ComputedScoreLive == nil {
+		t.Fatal("ComputedScoreLive = nil, want value")
+	}
+	wantScore := 125 + *explanation.ExpiryUrgencyBonus
+	if math.Abs(*explanation.ComputedScoreLive-wantScore) > 0.0001 {
+		t.Fatalf("ComputedScoreLive = %v, want %v", *explanation.ComputedScoreLive, wantScore)
+	}
+}
+
 func TestBuildCodexScoreExplanation_ExplainsUnavailableScore(t *testing.T) {
 	t.Parallel()
 

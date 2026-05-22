@@ -16,6 +16,9 @@ func TestCodexStateRoundTrip(t *testing.T) {
 	lastRefresh := fiveHourReset.Add(-15 * time.Minute)
 	probeAt := fiveHourReset.Add(-2 * time.Minute)
 	probeVerifiedAt := fiveHourReset.Add(-1 * time.Minute)
+	bootstrapProbeAt := fiveHourReset.Add(-3 * time.Minute)
+	bootstrapVerifiedAt := fiveHourReset.Add(-2 * time.Minute)
+	bootstrapNextAfter := fiveHourReset.Add(12 * time.Minute)
 
 	a := &Auth{}
 	a.SetCodexQuotaState(CodexQuotaState{
@@ -29,13 +32,19 @@ func TestCodexStateRoundTrip(t *testing.T) {
 			Limit:     float64Ptr(120),
 			ResetAt:   &weeklyReset,
 		},
-		LastRefreshAt:   &lastRefresh,
-		RefreshStatus:   "ok",
-		RefreshError:    "",
-		ProbeResetAt:    &fiveHourReset,
-		ProbeAt:         &probeAt,
-		ProbeVerifiedAt: &probeVerifiedAt,
-		ProbeStatus:     "verified",
+		LastRefreshAt:       &lastRefresh,
+		RefreshStatus:       "ok",
+		RefreshError:        "",
+		ProbeResetAt:        &fiveHourReset,
+		ProbeAt:             &probeAt,
+		ProbeVerifiedAt:     &probeVerifiedAt,
+		ProbeStatus:         "verified",
+		BootstrapStatus:     "pending",
+		BootstrapProbeAt:    &bootstrapProbeAt,
+		BootstrapVerifiedAt: &bootstrapVerifiedAt,
+		BootstrapNextAfter:  &bootstrapNextAfter,
+		BootstrapAttempts:   2,
+		BootstrapReason:     "weekly_missing",
 	})
 	a.SetCodexManualScoreAdjustment(1.25)
 	a.SetCodexComputedScore(7.5)
@@ -64,6 +73,18 @@ func TestCodexStateRoundTrip(t *testing.T) {
 	}
 	if quota.ProbeStatus != "verified" {
 		t.Fatalf("ProbeStatus = %q, want verified", quota.ProbeStatus)
+	}
+	if quota.BootstrapStatus != "pending" {
+		t.Fatalf("BootstrapStatus = %q, want pending", quota.BootstrapStatus)
+	}
+	assertTimePtr(t, quota.BootstrapProbeAt, bootstrapProbeAt)
+	assertTimePtr(t, quota.BootstrapVerifiedAt, bootstrapVerifiedAt)
+	assertTimePtr(t, quota.BootstrapNextAfter, bootstrapNextAfter)
+	if quota.BootstrapAttempts != 2 {
+		t.Fatalf("BootstrapAttempts = %d, want 2", quota.BootstrapAttempts)
+	}
+	if quota.BootstrapReason != "weekly_missing" {
+		t.Fatalf("BootstrapReason = %q, want weekly_missing", quota.BootstrapReason)
 	}
 
 	manual, ok := a.CodexManualScoreAdjustment()

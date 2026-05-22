@@ -227,7 +227,9 @@ type QuotaExceeded struct {
 // RoutingConfig configures how credentials are selected for requests.
 type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
-	// Supported values: "round-robin" (default), "fill-first", "codex-quota-score".
+	// Supported values: "round-robin", "fill-first", "codex-quota-score".
+	// Empty or invalid values fall back to "round-robin"; the Codex branch example
+	// config sets "codex-quota-score" explicitly.
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
 	// SessionAffinity enables universal session-sticky routing for all clients.

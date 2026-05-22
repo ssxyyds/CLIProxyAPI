@@ -201,6 +201,352 @@ func TestCodexExecutorRefresh_UsesAdditionalRateLimitsOnlyAsFallback(t *testing.
 	}
 }
 
+func TestCodexExecutorRefresh_ParsesSecondaryAdditionalRateLimitAsWeekly(t *testing.T) {
+	t.Parallel()
+
+	weeklyReset := time.Now().Add(7 * 24 * time.Hour).UTC().Truncate(time.Second)
+	fiveHourReset := time.Now().Add(5 * time.Hour).UTC().Truncate(time.Second)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/backend-api/codex/usage":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"rate_limit":{"primary_window":{"remaining":9,"limit":40,"reset_at":"` + fiveHourReset.Format(time.RFC3339) + `"},"additional_rate_limits":[{"window_name":"secondary","remaining":70,"limit":100,"reset_at":"` + weeklyReset.Format(time.RFC3339) + `"}]}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{
+			"email":        "user@example.com",
+			"access_token": "token-123",
+		},
+		Attributes: map[string]string{
+			"base_url": server.URL + "/backend-api/codex",
+		},
+	}
+
+	updated, err := executor.Refresh(context.Background(), auth)
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	quota, ok := updated.GetCodexQuotaState()
+	if !ok {
+		t.Fatal("GetCodexQuotaState() ok = false, want true")
+	}
+	if quota.FiveHour.Remaining == nil || *quota.FiveHour.Remaining != 9 {
+		t.Fatalf("FiveHour.Remaining = %#v, want primary window value 9", quota.FiveHour.Remaining)
+	}
+	if quota.Weekly.Remaining == nil || *quota.Weekly.Remaining != 70 {
+		t.Fatalf("Weekly.Remaining = %#v, want secondary additional rate limit value 70", quota.Weekly.Remaining)
+	}
+	if quota.Weekly.ResetAt == nil || !quota.Weekly.ResetAt.Equal(weeklyReset) {
+		t.Fatalf("Weekly.ResetAt = %v, want %v", quota.Weekly.ResetAt, weeklyReset)
+	}
+}
+
+func TestCodexExecutorRefresh_UsesWindowDurationToClassifyPrimaryWindow(t *testing.T) {
+	t.Parallel()
+
+	weeklyReset := time.Now().Add(7 * 24 * time.Hour).UTC().Truncate(time.Second)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/backend-api/codex/usage":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"rate_limit":{"primary_window":{"used_percent":3,"limit_window_seconds":604800,"reset_after_seconds":604800,"reset_at":"` + weeklyReset.Format(time.RFC3339) + `"},"secondary_window":null}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{
+			"email":        "user@example.com",
+			"access_token": "token-123",
+		},
+		Attributes: map[string]string{
+			"base_url": server.URL + "/backend-api/codex",
+		},
+	}
+
+	updated, err := executor.Refresh(context.Background(), auth)
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	quota, ok := updated.GetCodexQuotaState()
+	if !ok {
+		t.Fatal("GetCodexQuotaState() ok = false, want true")
+	}
+	if codexQuotaBucketHasData(quota.FiveHour) {
+		t.Fatalf("FiveHour = %#v, want empty when primary window duration is weekly", quota.FiveHour)
+	}
+	if quota.Weekly.Remaining == nil || *quota.Weekly.Remaining != 97 {
+		t.Fatalf("Weekly.Remaining = %#v, want 97 from used_percent", quota.Weekly.Remaining)
+	}
+	if quota.Weekly.Limit == nil || *quota.Weekly.Limit != 100 {
+		t.Fatalf("Weekly.Limit = %#v, want 100 from used_percent fallback", quota.Weekly.Limit)
+	}
+	if quota.Weekly.ResetAt == nil || !quota.Weekly.ResetAt.Equal(weeklyReset) {
+		t.Fatalf("Weekly.ResetAt = %v, want %v", quota.Weekly.ResetAt, weeklyReset)
+	}
+}
+
+func TestCodexExecutorRefresh_DoesNotBootstrapProbeWhenWeeklyKnownAndFiveHourMissing(t *testing.T) {
+	t.Parallel()
+
+	weeklyReset := time.Now().Add(7 * 24 * time.Hour).UTC().Truncate(time.Second)
+	var usageRequests atomic.Int32
+	var probeRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/backend-api/codex/usage":
+			w.Header().Set("Content-Type", "application/json")
+			usageRequests.Add(1)
+			_, _ = w.Write([]byte(`{"rate_limit":{"primary_window":{"used_percent":3,"limit_window_seconds":604800,"reset_after_seconds":604800,"reset_at":"` + weeklyReset.Format(time.RFC3339) + `"},"secondary_window":null}}`))
+		case "/backend-api/codex/responses/compact":
+			probeRequests.Add(1)
+			_, _ = w.Write([]byte(`{"id":"probe","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{
+			"email":        "user@example.com",
+			"access_token": "token-123",
+		},
+		Attributes: map[string]string{
+			"base_url": server.URL + "/backend-api/codex",
+		},
+	}
+
+	updated, err := executor.Refresh(context.Background(), auth)
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	if got := usageRequests.Load(); got != 1 {
+		t.Fatalf("usage requests = %d, want 1 without bootstrap re-fetch", got)
+	}
+	if got := probeRequests.Load(); got != 0 {
+		t.Fatalf("probe requests = %d, want 0 when weekly is already known", got)
+	}
+	quota, ok := updated.GetCodexQuotaState()
+	if !ok {
+		t.Fatal("GetCodexQuotaState() ok = false, want true")
+	}
+	if codexQuotaBucketHasData(quota.FiveHour) {
+		t.Fatalf("FiveHour = %#v, want empty when upstream omits five-hour window", quota.FiveHour)
+	}
+	if quota.Weekly.Remaining == nil || *quota.Weekly.Remaining != 97 {
+		t.Fatalf("Weekly.Remaining = %#v, want 97 from weekly window", quota.Weekly.Remaining)
+	}
+	if quota.BootstrapStatus != "complete" {
+		t.Fatalf("BootstrapStatus = %q, want complete", quota.BootstrapStatus)
+	}
+}
+
+func TestCodexExecutorRefresh_BootstrapProbesWhenWeeklyMissingWithoutImmediateRefetch(t *testing.T) {
+	t.Parallel()
+
+	var usageRequests atomic.Int32
+	var probeRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/backend-api/codex/usage":
+			w.Header().Set("Content-Type", "application/json")
+			usageRequests.Add(1)
+			_, _ = w.Write([]byte(`{"rate_limit":{"primary_window":{"remaining":8,"limit":40,"limit_window_seconds":18000},"secondary_window":null}}`))
+		case "/backend-api/codex/responses/compact":
+			probeRequests.Add(1)
+			_, _ = w.Write([]byte(`{"id":"probe","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{
+			"email":        "user@example.com",
+			"access_token": "token-123",
+		},
+		Attributes: map[string]string{
+			"base_url": server.URL + "/backend-api/codex",
+		},
+	}
+
+	updated, err := executor.Refresh(context.Background(), auth)
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	if got := usageRequests.Load(); got != 1 {
+		t.Fatalf("usage requests = %d, want 1 without immediate bootstrap re-fetch", got)
+	}
+	if got := probeRequests.Load(); got != 1 {
+		t.Fatalf("probe requests = %d, want 1 bootstrap ping", got)
+	}
+	quota, ok := updated.GetCodexQuotaState()
+	if !ok {
+		t.Fatal("GetCodexQuotaState() ok = false, want true")
+	}
+	if quota.FiveHour.Remaining == nil || *quota.FiveHour.Remaining != 8 {
+		t.Fatalf("FiveHour.Remaining = %#v, want 8 from first usage response", quota.FiveHour.Remaining)
+	}
+	if codexQuotaBucketHasData(quota.Weekly) {
+		t.Fatalf("Weekly = %#v, want empty until a later refresh observes it", quota.Weekly)
+	}
+	if quota.BootstrapStatus != "pending" {
+		t.Fatalf("BootstrapStatus = %q, want pending", quota.BootstrapStatus)
+	}
+	if quota.BootstrapAttempts != 1 {
+		t.Fatalf("BootstrapAttempts = %d, want 1", quota.BootstrapAttempts)
+	}
+	if quota.BootstrapProbeAt == nil || quota.BootstrapProbeAt.IsZero() {
+		t.Fatal("BootstrapProbeAt = nil/zero, want set")
+	}
+	if quota.BootstrapNextAfter == nil || !quota.BootstrapNextAfter.After(*quota.BootstrapProbeAt) {
+		t.Fatalf("BootstrapNextAfter = %v, want after BootstrapProbeAt %v", quota.BootstrapNextAfter, quota.BootstrapProbeAt)
+	}
+	if quota.BootstrapReason != "weekly_missing" {
+		t.Fatalf("BootstrapReason = %q, want weekly_missing", quota.BootstrapReason)
+	}
+}
+
+func TestCodexExecutorRefresh_ResetRecoveryProbeTakesPriorityOverBootstrap(t *testing.T) {
+	t.Parallel()
+
+	nowReset := time.Now().UTC().Add(5*time.Hour + 5*time.Minute).Truncate(time.Second)
+	var probeRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/backend-api/codex/usage":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"rate_limit":{"primary_window":{"remaining":8,"limit":40,"limit_window_seconds":18000,"reset_at":"` + nowReset.Format(time.RFC3339) + `"},"secondary_window":null}}`))
+		case "/backend-api/codex/responses/compact":
+			probeRequests.Add(1)
+			_, _ = w.Write([]byte(`{"id":"probe","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{
+			"email":        "user@example.com",
+			"access_token": "token-123",
+		},
+		Attributes: map[string]string{
+			"base_url": server.URL + "/backend-api/codex",
+		},
+	}
+
+	updated, err := executor.Refresh(context.Background(), auth)
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	if got := probeRequests.Load(); got != 1 {
+		t.Fatalf("probe requests = %d, want 1 reset recovery probe", got)
+	}
+	quota, ok := updated.GetCodexQuotaState()
+	if !ok {
+		t.Fatal("GetCodexQuotaState() ok = false, want true")
+	}
+	if quota.ProbeStatus != "verified" {
+		t.Fatalf("ProbeStatus = %q, want verified", quota.ProbeStatus)
+	}
+	if quota.ProbeResetAt == nil || !quota.ProbeResetAt.Equal(nowReset) {
+		t.Fatalf("ProbeResetAt = %v, want %v", quota.ProbeResetAt, nowReset)
+	}
+	if quota.BootstrapStatus != "" {
+		t.Fatalf("BootstrapStatus = %q, want empty because reset recovery takes priority", quota.BootstrapStatus)
+	}
+}
+
+func TestCodexExecutorRefresh_BootstrapProbeBacksOffAfterRepeatedAttempts(t *testing.T) {
+	t.Parallel()
+
+	var probeRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/backend-api/codex/usage":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"rate_limit":{"primary_window":{"remaining":8,"limit":40,"limit_window_seconds":18000},"secondary_window":null}}`))
+		case "/backend-api/codex/responses/compact":
+			probeRequests.Add(1)
+			_, _ = w.Write([]byte(`{"id":"probe","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{
+			"email":        "user@example.com",
+			"access_token": "token-123",
+		},
+		Attributes: map[string]string{
+			"base_url": server.URL + "/backend-api/codex",
+		},
+	}
+
+	updated, err := executor.Refresh(context.Background(), auth)
+	if err != nil {
+		t.Fatalf("first Refresh() error = %v", err)
+	}
+	firstQuota, ok := updated.GetCodexQuotaState()
+	if !ok {
+		t.Fatal("first GetCodexQuotaState() ok = false, want true")
+	}
+	if firstQuota.BootstrapAttempts != 1 {
+		t.Fatalf("first BootstrapAttempts = %d, want 1", firstQuota.BootstrapAttempts)
+	}
+	if got := probeRequests.Load(); got != 1 {
+		t.Fatalf("probe requests after first refresh = %d, want 1", got)
+	}
+
+	secondAt := firstQuota.BootstrapNextAfter.Add(time.Second)
+	auth.SetCodexQuotaState(firstQuota)
+	quotaAfterSecond, blockedUntil := executor.bootstrapCodexQuotaUsageIfWindowMissing(context.Background(), auth, firstQuota, secondAt)
+	if blockedUntil != nil {
+		t.Fatalf("blockedUntil = %v, want nil", blockedUntil)
+	}
+	if quotaAfterSecond.BootstrapAttempts != 2 {
+		t.Fatalf("second BootstrapAttempts = %d, want 2", quotaAfterSecond.BootstrapAttempts)
+	}
+	if got := probeRequests.Load(); got != 2 {
+		t.Fatalf("probe requests after second attempt = %d, want 2", got)
+	}
+	if got := quotaAfterSecond.BootstrapNextAfter.Sub(*quotaAfterSecond.BootstrapProbeAt); got != time.Hour {
+		t.Fatalf("second bootstrap backoff = %s, want 1h", got)
+	}
+
+	blockedState, _ := executor.bootstrapCodexQuotaUsageIfWindowMissing(context.Background(), auth, quotaAfterSecond, quotaAfterSecond.BootstrapProbeAt.Add(30*time.Minute))
+	if blockedState.BootstrapAttempts != 2 {
+		t.Fatalf("blocked BootstrapAttempts = %d, want unchanged 2", blockedState.BootstrapAttempts)
+	}
+	if got := probeRequests.Load(); got != 2 {
+		t.Fatalf("probe requests during backoff = %d, want unchanged 2", got)
+	}
+}
+
 func TestCodexExecutorRefresh_PreservesPriorWindowsOnQuotaFetchFailure(t *testing.T) {
 	t.Parallel()
 

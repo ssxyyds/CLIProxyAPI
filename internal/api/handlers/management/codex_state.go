@@ -5,6 +5,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -61,9 +62,10 @@ func (h *Handler) GetCodexState(c *gin.Context) {
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"codex-state":      items,
-		"summary":          buildCodexStateSummary(auths),
-		"routing_strategy": h.codexRoutingStrategy(),
+		"codex-state":        items,
+		"summary":            buildCodexStateSummary(auths),
+		"routing_strategy":   h.codexRoutingStrategy(),
+		"current_selections": buildCodexCurrentSelections(auths),
 	})
 }
 
@@ -118,17 +120,28 @@ func (h *Handler) PatchCodexStateManualScore(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
 		return
 	}
+	picked := coreauth.RecalculateCurrentCodexStickyAuth(h.authManager.List(), time.Now().UTC())
 	updated, ok := h.authManager.GetByID(targetAuth.ID)
 	if !ok {
 		updated = targetAuth
 	}
-	c.JSON(http.StatusOK, gin.H{
+	response := gin.H{
 		"status":                        "ok",
 		"id":                            updated.ID,
 		"auth_index":                    updated.EnsureIndex(),
 		"name":                          codexStateName(updated),
 		"codex_manual_score_adjustment": *req.Value,
-	})
+	}
+	if picked != nil {
+		response["on_device"] = gin.H{
+			"id":         picked.ID,
+			"auth_index": picked.EnsureIndex(),
+			"name":       codexStateName(picked),
+			"email":      authEmail(picked),
+			"account":    buildCodexStateAccountLabel(picked),
+		}
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) PostCodexStateRefresh(c *gin.Context) {
@@ -292,6 +305,42 @@ func buildCodexStateEntry(auth *coreauth.Auth) gin.H {
 		entry["id_token"] = claims
 	}
 	return entry
+}
+
+func buildCodexCurrentSelections(auths []*coreauth.Auth) []gin.H {
+	stickySelections := coreauth.CurrentCodexStickySelections()
+	if len(stickySelections) == 0 {
+		return []gin.H{}
+	}
+	byID := make(map[string]*coreauth.Auth, len(auths))
+	for _, auth := range auths {
+		if shouldHideCodexStateAuth(auth) {
+			continue
+		}
+		byID[auth.ID] = auth
+	}
+	models := make([]string, 0, len(stickySelections))
+	for model := range stickySelections {
+		models = append(models, model)
+	}
+	sort.Strings(models)
+	selections := make([]gin.H, 0, len(models))
+	for _, model := range models {
+		authID := strings.TrimSpace(stickySelections[model])
+		auth := byID[authID]
+		if auth == nil {
+			continue
+		}
+		selections = append(selections, gin.H{
+			"model":      model,
+			"id":         auth.ID,
+			"auth_index": auth.EnsureIndex(),
+			"name":       codexStateName(auth),
+			"email":      authEmail(auth),
+			"account":    buildCodexStateAccountLabel(auth),
+		})
+	}
+	return selections
 }
 
 func codexPlanType(auth *coreauth.Auth) string {

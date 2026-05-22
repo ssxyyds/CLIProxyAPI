@@ -41,6 +41,63 @@ func (e *CodexExecutor) verifyCodexQuotaRecovery(ctx context.Context, auth *clip
 	return state, state.CodexProbeVerifiedForReset(resetAt)
 }
 
+func (e *CodexExecutor) bootstrapCodexQuotaUsageIfWindowMissing(ctx context.Context, auth *cliproxyauth.Auth, state cliproxyauth.CodexQuotaState, now time.Time) (cliproxyauth.CodexQuotaState, *time.Time) {
+	if codexQuotaBucketHasData(state.Weekly) {
+		return markCodexQuotaBootstrapComplete(state), nil
+	}
+	if codexQuotaBootstrapProbeBackoffActive(state, now) {
+		return state, nil
+	}
+
+	probeAt := now.UTC()
+	attempts := state.BootstrapAttempts + 1
+	nextAfter := probeAt.Add(codexQuotaBootstrapBackoff(attempts))
+	state.BootstrapProbeAt = &probeAt
+	state.BootstrapVerifiedAt = nil
+	state.BootstrapNextAfter = &nextAfter
+	state.BootstrapAttempts = attempts
+	state.BootstrapStatus = "failed"
+	state.BootstrapReason = "weekly_missing"
+	state.BootstrapError = ""
+	if err := e.runCodexQuotaRecoveryProbe(ctx, auth); err != nil {
+		state.BootstrapError = strings.TrimSpace(err.Error())
+		return state, nil
+	}
+
+	state.BootstrapVerifiedAt = &probeAt
+	state.BootstrapStatus = "pending"
+	state.BootstrapError = ""
+	return state, nil
+}
+
+func markCodexQuotaBootstrapComplete(state cliproxyauth.CodexQuotaState) cliproxyauth.CodexQuotaState {
+	state.BootstrapStatus = "complete"
+	state.BootstrapError = ""
+	state.BootstrapReason = ""
+	state.BootstrapNextAfter = nil
+	return state
+}
+
+func codexQuotaBootstrapProbeBackoffActive(state cliproxyauth.CodexQuotaState, now time.Time) bool {
+	if state.BootstrapNextAfter == nil || state.BootstrapNextAfter.IsZero() {
+		return false
+	}
+	return now.UTC().Before(state.BootstrapNextAfter.UTC())
+}
+
+func codexQuotaBootstrapBackoff(attempts int) time.Duration {
+	switch {
+	case attempts <= 1:
+		return cliproxyauth.CodexQuotaRefreshInterval
+	case attempts == 2:
+		return time.Hour
+	case attempts == 3:
+		return 6 * time.Hour
+	default:
+		return 24 * time.Hour
+	}
+}
+
 func (e *CodexExecutor) runCodexQuotaRecoveryProbe(ctx context.Context, auth *cliproxyauth.Auth) error {
 	token, baseURL := codexCreds(auth)
 	if strings.TrimSpace(token) == "" {
@@ -245,7 +302,6 @@ func codexQuotaRefreshURLs(baseURL string) []string {
 
 func parseCodexQuotaRefreshPayload(body []byte) (codexQuotaRefreshPayload, bool) {
 	payload := codexQuotaRefreshPayload{}
-	now := time.Now().UTC()
 	payload.state.FiveHour = parseCodexQuotaBucket(body,
 		"quota.five_hour", "quota.fiveHour", "five_hour", "fiveHour",
 		"usage.five_hour", "usage.fiveHour", "ratelimits.five_hour", "ratelimits.fiveHour",
@@ -254,12 +310,8 @@ func parseCodexQuotaRefreshPayload(body []byte) (codexQuotaRefreshPayload, bool)
 		"quota.weekly", "quota.weekly_window", "weekly", "weekly_window",
 		"usage.weekly", "usage.weekly_window", "ratelimits.weekly", "ratelimits.weekly_window",
 	)
-	if !codexQuotaBucketHasData(payload.state.Weekly) {
-		payload.state.Weekly = parseCodexQuotaBucketAt(body, now, "rate_limit.secondary_window")
-	}
-	if !codexQuotaBucketHasData(payload.state.FiveHour) {
-		payload.state.FiveHour = parseCodexQuotaBucketAt(body, now, "rate_limit.primary_window")
-	}
+	mergeCodexRateLimitWindowBucket(body, &payload.state, "rate_limit.primary_window", "five_hour")
+	mergeCodexRateLimitWindowBucket(body, &payload.state, "rate_limit.secondary_window", "weekly")
 	mergeCodexAdditionalRateLimitBuckets(body, &payload.state)
 	if blockedUntil, ok := firstTimePath(body,
 		"quota_blocked_until", "quota.blocked_until", "quota.blockedUntil",
@@ -332,6 +384,34 @@ func parseCodexQuotaBucketAt(body []byte, now time.Time, prefixes ...string) cli
 	return cliproxyauth.CodexQuotaBucket{}
 }
 
+func mergeCodexRateLimitWindowBucket(body []byte, state *cliproxyauth.CodexQuotaState, path, fallbackKind string) {
+	if state == nil {
+		return
+	}
+	result := gjson.GetBytes(body, path)
+	if !result.Exists() || result.Type == gjson.Null {
+		return
+	}
+	bucket := parseCodexQuotaBucketAt(body, time.Now().UTC(), path)
+	if !codexQuotaBucketHasData(bucket) {
+		return
+	}
+	kind := codexQuotaBucketWindowKind([]byte(result.Raw))
+	if kind == "" {
+		kind = fallbackKind
+	}
+	switch kind {
+	case "weekly":
+		if !codexQuotaBucketHasData(state.Weekly) {
+			state.Weekly = bucket
+		}
+	case "five_hour":
+		if !codexQuotaBucketHasData(state.FiveHour) {
+			state.FiveHour = bucket
+		}
+	}
+}
+
 func codexQuotaFieldPath(prefix, field string) string {
 	prefix = strings.TrimSpace(prefix)
 	field = strings.TrimSpace(field)
@@ -383,14 +463,8 @@ func codexQuotaBucketWindowKind(body []byte) string {
 	if (strings.Contains(label, "five") || strings.Contains(label, "5")) && strings.Contains(label, "hour") {
 		return "five_hour"
 	}
-	if strings.Contains(label, "secondary") {
-		return "five_hour"
-	}
-	if strings.Contains(label, "primary") {
-		return "weekly"
-	}
 	if seconds, ok := firstFloatPath(body,
-		"window_seconds", "duration_seconds", "interval_seconds", "reset_interval_seconds",
+		"window_seconds", "duration_seconds", "interval_seconds", "reset_interval_seconds", "limit_window_seconds", "limitWindowSeconds",
 	); ok {
 		switch {
 		case seconds >= 6*24*60*60:
@@ -398,6 +472,12 @@ func codexQuotaBucketWindowKind(body []byte) string {
 		case seconds >= 4*60*60 && seconds <= 6*60*60:
 			return "five_hour"
 		}
+	}
+	if strings.Contains(label, "secondary") {
+		return "weekly"
+	}
+	if strings.Contains(label, "primary") {
+		return "five_hour"
 	}
 	return ""
 }
@@ -408,10 +488,14 @@ func codexQuotaBucketHasData(bucket cliproxyauth.CodexQuotaBucket) bool {
 
 func cloneCodexQuotaState(state cliproxyauth.CodexQuotaState) cliproxyauth.CodexQuotaState {
 	cloned := cliproxyauth.CodexQuotaState{
-		RefreshStatus: state.RefreshStatus,
-		RefreshError:  state.RefreshError,
-		ProbeStatus:   state.ProbeStatus,
-		ProbeError:    state.ProbeError,
+		RefreshStatus:     state.RefreshStatus,
+		RefreshError:      state.RefreshError,
+		ProbeStatus:       state.ProbeStatus,
+		ProbeError:        state.ProbeError,
+		BootstrapStatus:   state.BootstrapStatus,
+		BootstrapError:    state.BootstrapError,
+		BootstrapReason:   state.BootstrapReason,
+		BootstrapAttempts: state.BootstrapAttempts,
 	}
 	if state.FiveHour.Remaining != nil {
 		value := *state.FiveHour.Remaining
@@ -452,6 +536,18 @@ func cloneCodexQuotaState(state cliproxyauth.CodexQuotaState) cliproxyauth.Codex
 	if state.ProbeVerifiedAt != nil {
 		value := state.ProbeVerifiedAt.UTC()
 		cloned.ProbeVerifiedAt = &value
+	}
+	if state.BootstrapProbeAt != nil {
+		value := state.BootstrapProbeAt.UTC()
+		cloned.BootstrapProbeAt = &value
+	}
+	if state.BootstrapVerifiedAt != nil {
+		value := state.BootstrapVerifiedAt.UTC()
+		cloned.BootstrapVerifiedAt = &value
+	}
+	if state.BootstrapNextAfter != nil {
+		value := state.BootstrapNextAfter.UTC()
+		cloned.BootstrapNextAfter = &value
 	}
 	return cloned
 }

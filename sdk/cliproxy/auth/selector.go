@@ -635,6 +635,28 @@ func (s *codexStickySelectionState) currentAuthIDForProvider(provider string) st
 	return strings.TrimSpace(s.byProvider[providerKey])
 }
 
+func (s *codexStickySelectionState) currentSelectionsForProvider(provider string) map[string]string {
+	selections := map[string]string{}
+	if s == nil {
+		return selections
+	}
+	providerKey := strings.ToLower(strings.TrimSpace(provider))
+	if providerKey == "" {
+		providerKey = "codex"
+	}
+	prefix := providerKey + ":"
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, authID := range s.byKey {
+		if !strings.HasPrefix(key, prefix) || strings.TrimSpace(authID) == "" {
+			continue
+		}
+		model := strings.TrimPrefix(key, prefix)
+		selections[model] = strings.TrimSpace(authID)
+	}
+	return selections
+}
+
 func providerFromStickySelectionKey(key string) string {
 	key = strings.TrimSpace(key)
 	if key == "" {
@@ -646,6 +668,10 @@ func providerFromStickySelectionKey(key string) string {
 
 func CurrentCodexStickyAuthID() string {
 	return globalCodexStickySelection.currentAuthIDForProvider("codex")
+}
+
+func CurrentCodexStickySelections() map[string]string {
+	return globalCodexStickySelection.currentSelectionsForProvider("codex")
 }
 
 func ReleaseCodexStickyAuth(authID string) {

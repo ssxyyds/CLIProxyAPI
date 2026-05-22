@@ -50,7 +50,7 @@ func BuildCodexScoreExplanation(auth *Auth, now time.Time) CodexScoreExplanation
 	explanation.RefreshStatus = strings.TrimSpace(quota.RefreshStatus)
 	explanation.RefreshIsFresh = codexQuotaRefreshStateUsable(quota, now)
 
-	scoreBucket, scoreWindow := codexScoreBucket(quota)
+	scoreBucket, scoreWindow := codexScoreBucket(quota, now)
 	if quota.Weekly.Remaining != nil {
 		explanation.WeeklyRemaining = float64Ptr(*quota.Weekly.Remaining)
 	}
@@ -88,11 +88,21 @@ func BuildCodexScoreExplanation(auth *Auth, now time.Time) CodexScoreExplanation
 	return explanation
 }
 
-func codexScoreBucket(quota CodexQuotaState) (CodexQuotaBucket, string) {
+func codexScoreBucket(quota CodexQuotaState, now time.Time) (CodexQuotaBucket, string) {
+	if codexScoreBucketUsable(quota.Weekly, now) {
+		return quota.Weekly, "weekly"
+	}
+	if codexScoreBucketUsable(quota.FiveHour, now) {
+		return quota.FiveHour, "five_hour"
+	}
 	if quota.Weekly.Remaining != nil || quota.Weekly.ResetAt != nil {
 		return quota.Weekly, "weekly"
 	}
 	return quota.FiveHour, "five_hour"
+}
+
+func codexScoreBucketUsable(bucket CodexQuotaBucket, now time.Time) bool {
+	return bucket.Remaining != nil && bucket.ResetAt != nil && bucket.ResetAt.After(now)
 }
 
 func codexExpiryUrgencyBonus(hoursUntilReset float64) float64 {

@@ -857,8 +857,14 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 			if blockedUntil == nil {
 				if probeResetAt, ok := quotaState.CodexProbeEligibleResetAt(now); ok {
 					quotaState, verifiedRecovery = e.verifyCodexQuotaRecovery(ctx, auth, quotaState, now, *probeResetAt)
-				} else if windowResetAt, ok := quotaState.CodexProbeWindowResetAt(now); ok {
-					verifiedRecovery = quotaState.CodexProbeVerifiedForReset(*windowResetAt)
+				} else {
+					var bootstrapBlockedUntil *time.Time
+					quotaState, bootstrapBlockedUntil = e.bootstrapCodexQuotaUsageIfWindowMissing(ctx, auth, quotaState, now)
+					if bootstrapBlockedUntil != nil {
+						blockedUntil = bootstrapBlockedUntil
+					} else if windowResetAt, ok := quotaState.CodexProbeWindowResetAt(now); ok {
+						verifiedRecovery = quotaState.CodexProbeVerifiedForReset(*windowResetAt)
+					}
 				}
 			}
 			auth.SetCodexQuotaState(quotaState)

@@ -221,7 +221,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 
 func isBuiltInSelector(selector Selector) bool {
 	switch selector.(type) {
-	case *RoundRobinSelector, *FillFirstSelector, *CodexQuotaScoreSelector:
+	case *RoundRobinSelector, *FillFirstSelector:
 		return true
 	default:
 		return false

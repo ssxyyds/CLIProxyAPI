@@ -337,6 +337,94 @@ func TestGetCodexState_IncludesPoolSummary(t *testing.T) {
 	}
 }
 
+func TestGetCodexState_IncludesCurrentSelectionsByModel(t *testing.T) {
+	h, manager, _, oauthAuth, _, _ := newCodexManagementHandler(t)
+	r := setupCodexManagementRouter(h)
+
+	resetAt := time.Now().UTC().Add(6 * time.Hour)
+	oauthRemaining := 80.0
+	challengerRemaining := 90.0
+	limit := 100.0
+	storedOAuth, ok := manager.GetByID(oauthAuth.ID)
+	if !ok {
+		t.Fatalf("expected oauth auth to exist")
+	}
+	oauthQuota, ok := storedOAuth.GetCodexQuotaState()
+	if !ok {
+		t.Fatalf("expected oauth auth quota state")
+	}
+	oauthQuota.FiveHour = coreauth.CodexQuotaBucket{Remaining: &oauthRemaining, Limit: &limit, ResetAt: &resetAt}
+	storedOAuth.ModelStates = map[string]*coreauth.ModelState{
+		"gpt-5.4-mini": {Unavailable: true, NextRetryAfter: resetAt},
+	}
+	storedOAuth.SetCodexQuotaState(oauthQuota)
+	if _, err := manager.Update(context.Background(), storedOAuth); err != nil {
+		t.Fatalf("update oauth auth: %v", err)
+	}
+
+	challenger := &coreauth.Auth{
+		ID:       "codex-oauth-challenger",
+		Provider: "codex",
+		FileName: "codex-challenger.json",
+		Metadata: map[string]any{
+			"email": "challenger@example.com",
+		},
+		ModelStates: map[string]*coreauth.ModelState{
+			"gpt-5.4": {Unavailable: true, NextRetryAfter: resetAt},
+		},
+		Status: coreauth.StatusActive,
+	}
+	challenger.SetCodexQuotaState(coreauth.CodexQuotaState{
+		Weekly:        coreauth.CodexQuotaBucket{Remaining: &challengerRemaining, Limit: &limit, ResetAt: &resetAt},
+		FiveHour:      coreauth.CodexQuotaBucket{Remaining: &challengerRemaining, Limit: &limit, ResetAt: &resetAt},
+		LastRefreshAt: &resetAt,
+		RefreshStatus: "ok",
+	})
+	if _, err := manager.Register(context.Background(), challenger); err != nil {
+		t.Fatalf("register challenger auth: %v", err)
+	}
+
+	coreauth.RecalculateCurrentCodexStickyAuth(nil, time.Now().UTC())
+	selector := &coreauth.CodexQuotaScoreSelector{}
+	codexOAuthAuths := []*coreauth.Auth{storedOAuth, challenger}
+	if picked, err := selector.Pick(context.Background(), "codex", "gpt-5.4", cliproxyexecutor.Options{}, codexOAuthAuths); err != nil || picked.ID != oauthAuth.ID {
+		t.Fatalf("pick gpt-5.4 = %#v, %v; want %q", picked, err, oauthAuth.ID)
+	}
+	if picked, err := selector.Pick(context.Background(), "codex", "gpt-5.4-mini", cliproxyexecutor.Options{}, codexOAuthAuths); err != nil || picked.ID != challenger.ID {
+		t.Fatalf("pick gpt-5.4-mini = %#v, %v; want %q", picked, err, challenger.ID)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/codex-state", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	rawSelections, ok := resp["current_selections"].([]any)
+	if !ok {
+		t.Fatalf("current_selections = %#v, want array", resp["current_selections"])
+	}
+	got := map[string]string{}
+	for _, raw := range rawSelections {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("current selection entry = %#v, want object", raw)
+		}
+		got[entry["model"].(string)] = entry["id"].(string)
+	}
+	if got["gpt-5.4"] != oauthAuth.ID {
+		t.Fatalf("gpt-5.4 current selection = %q, want %q", got["gpt-5.4"], oauthAuth.ID)
+	}
+	if got["gpt-5.4-mini"] != challenger.ID {
+		t.Fatalf("gpt-5.4-mini current selection = %q, want %q", got["gpt-5.4-mini"], challenger.ID)
+	}
+}
+
 func TestGetCodexState_HidesDisabledRemovedFileBackedAuthsButKeepsActiveOnes(t *testing.T) {
 	h, manager, _, oauthAuth, _, _ := newCodexManagementHandler(t)
 
@@ -509,6 +597,67 @@ func TestPatchCodexStateManualScore(t *testing.T) {
 	manual, ok := updated.CodexManualScoreAdjustment()
 	if !ok || manual != 3.25 {
 		t.Fatalf("expected updated manual score 3.25, got %v, %v", manual, ok)
+	}
+}
+
+func TestPatchCodexStateManualScore_RecalculatesCurrentSelection(t *testing.T) {
+	h, manager, _, oauthAuth, _, _ := newCodexManagementHandler(t)
+	r := setupCodexManagementRouter(h)
+
+	resetAt := time.Now().UTC().Add(6 * time.Hour)
+	oauthRemaining := 42.0
+	oauthLimit := 100.0
+	storedOAuth, ok := manager.GetByID(oauthAuth.ID)
+	if !ok {
+		t.Fatalf("expected oauth auth to exist")
+	}
+	quota, ok := storedOAuth.GetCodexQuotaState()
+	if !ok {
+		t.Fatalf("expected oauth auth quota state")
+	}
+	quota.FiveHour = coreauth.CodexQuotaBucket{Remaining: &oauthRemaining, Limit: &oauthLimit, ResetAt: &resetAt}
+	storedOAuth.SetCodexQuotaState(quota)
+	if _, err := manager.Update(context.Background(), storedOAuth); err != nil {
+		t.Fatalf("update oauth quota: %v", err)
+	}
+
+	remaining := 1.0
+	limit := 100.0
+	challenger := &coreauth.Auth{
+		ID:       "codex-oauth-challenger",
+		Provider: "codex",
+		FileName: "codex-challenger.json",
+		Metadata: map[string]any{
+			"email": "challenger@example.com",
+		},
+		Status: coreauth.StatusActive,
+	}
+	challenger.SetCodexQuotaState(coreauth.CodexQuotaState{
+		Weekly:        coreauth.CodexQuotaBucket{Remaining: &remaining, Limit: &limit, ResetAt: &resetAt},
+		FiveHour:      coreauth.CodexQuotaBucket{Remaining: &remaining, Limit: &limit, ResetAt: &resetAt},
+		LastRefreshAt: &resetAt,
+		RefreshStatus: "ok",
+	})
+	if _, err := manager.Register(context.Background(), challenger); err != nil {
+		t.Fatalf("register challenger auth: %v", err)
+	}
+
+	coreauth.RecalculateCurrentCodexStickyAuth(manager.List(), time.Now().UTC())
+	if got := coreauth.CurrentCodexStickyAuthID(); got != oauthAuth.ID {
+		t.Fatalf("initial current auth = %q, want %q", got, oauthAuth.ID)
+	}
+
+	body := `{"id":"` + challenger.ID + `","value":100}`
+	req := httptest.NewRequest(http.MethodPatch, "/v0/management/codex-state/manual-score", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+	if got := coreauth.CurrentCodexStickyAuthID(); got != challenger.ID {
+		t.Fatalf("current auth after manual score = %q, want %q", got, challenger.ID)
 	}
 }
 

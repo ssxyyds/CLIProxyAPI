@@ -61,6 +61,57 @@ func TestCodexQuotaScoreSelectorFallbackUsesFillFirst(t *testing.T) {
 	}
 }
 
+func TestCodexQuotaScoreSelectorUsesManualScoreWithFiveHourFallback(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	lastRefresh := now.Add(-5 * time.Minute)
+	reset := now.Add(2 * time.Hour)
+	low := &Auth{ID: "low", Provider: "codex", Metadata: map[string]any{"email": "low@example.com"}}
+	low.SetCodexQuotaState(CodexQuotaState{
+		FiveHour:      CodexQuotaBucket{Remaining: float64Ptr(90), Limit: float64Ptr(100), ResetAt: &reset},
+		LastRefreshAt: &lastRefresh,
+		RefreshStatus: "ok",
+	})
+	highManual := &Auth{ID: "high-manual", Provider: "codex", Metadata: map[string]any{"email": "high@example.com"}}
+	highManual.SetCodexQuotaState(CodexQuotaState{
+		FiveHour: CodexQuotaBucket{Remaining: float64Ptr(10), Limit: float64Ptr(100), ResetAt: &reset},
+		Weekly: CodexQuotaBucket{
+			Remaining: float64Ptr(100),
+			Limit:     float64Ptr(100),
+		},
+		LastRefreshAt: &lastRefresh,
+		RefreshStatus: "ok",
+	})
+	highManual.SetCodexManualScoreAdjustment(100)
+
+	selector := &CodexQuotaScoreSelector{sticky: &codexStickySelectionState{byKey: map[string]string{}, byProvider: map[string]string{}}}
+	got, err := selector.Pick(context.Background(), "codex", "gpt-5.4", cliproxyexecutor.Options{}, []*Auth{low, highManual})
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil || got.ID != "high-manual" {
+		t.Fatalf("Pick() auth = %#v, want high-manual", got)
+	}
+}
+
+func TestCodexStickySelectionsByModel(t *testing.T) {
+	t.Parallel()
+
+	state := &codexStickySelectionState{byKey: map[string]string{}, byProvider: map[string]string{}}
+	state.set(codexStickySelectionKey("codex", "gpt-5.4"), "auth-54")
+	state.set(codexStickySelectionKey("codex", "gpt-5.4-mini"), "auth-mini")
+
+	got := state.currentSelectionsForProvider("codex")
+
+	if got["gpt-5.4"] != "auth-54" {
+		t.Fatalf("gpt-5.4 sticky = %q, want auth-54", got["gpt-5.4"])
+	}
+	if got["gpt-5.4-mini"] != "auth-mini" {
+		t.Fatalf("gpt-5.4-mini sticky = %q, want auth-mini", got["gpt-5.4-mini"])
+	}
+}
+
 func TestRoundRobinSelectorPick_CyclesDeterministic(t *testing.T) {
 	t.Parallel()
 
