@@ -5,6 +5,14 @@ Go 1.26+ proxy server providing OpenAI/Gemini/Claude/Codex compatible APIs with 
 ## Repository
 - GitHub: https://github.com/router-for-me/CLIProxyAPI
 
+## Local Codex Enhancement Branch
+- This workspace maintains ssxyyds Codex-specific behavior on branch `codex-enhancement`.
+- Before changing Codex routing, quota refresh, probe, management API, or score behavior, read `docs/codex-enhancements.md`.
+- Treat `docs/codex-enhancements.md` as the operational contract for downstream dashboards such as `cpa-usage-keeper`.
+- Keep Codex enhancements thin and upstream-sync friendly: prefer `codex_*` files and small hook points over broad rewrites of shared routing, config, or executor code.
+- For dashboard-facing changes, keep `/v0/management/codex-state` stable and update `docs/codex-enhancements.md` plus `test/codex_enhancement_docs_test.go`.
+- Do not duplicate dashboard policy in CLIProxyAPI docs; CPA is the Codex authority, usage-keeper is a consumer.
+
 ## Commands
 ```bash
 gofmt -w . # Format (required after Go changes)
