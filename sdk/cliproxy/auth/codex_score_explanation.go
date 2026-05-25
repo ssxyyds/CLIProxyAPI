@@ -119,6 +119,9 @@ func codexRefreshDisqualifierReason(quota CodexQuotaState, now time.Time) string
 	if quota.LastRefreshAt == nil || quota.LastRefreshAt.IsZero() {
 		return "missing_last_refresh_at"
 	}
+	if codexQuotaRefreshErrorIsHardAuthFailure(quota.RefreshError) {
+		return "refresh_error_auth"
+	}
 	if quota.LastRefreshAt.Before(now.Add(-codexQuotaScoreFreshnessWindow)) {
 		return "stale_refresh"
 	}
@@ -127,6 +130,74 @@ func codexRefreshDisqualifierReason(quota CodexQuotaState, now time.Time) string
 		return "refresh_status_unknown"
 	}
 	return "refresh_status_" + status
+}
+
+func codexQuotaRefreshErrorIsHardAuthFailure(message string) bool {
+	message = strings.ToLower(strings.TrimSpace(message))
+	if message == "" {
+		return false
+	}
+	for _, token := range []string{
+		"usage returned 401",
+		"status 401",
+		"401 unauthorized",
+		"unauthorized",
+		"invalid_grant",
+		"invalid token",
+		"invalid_token",
+		"access token missing",
+		"missing access token",
+		"refresh token",
+	} {
+		if strings.Contains(message, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func codexQuotaRefreshErrorIsTransient(message string) bool {
+	message = strings.ToLower(strings.TrimSpace(message))
+	if message == "" {
+		return false
+	}
+	if codexQuotaRefreshErrorIsHardAuthFailure(message) {
+		return false
+	}
+	for _, token := range []string{
+		"cloudflare",
+		"challenge",
+		"timeout",
+		"deadline exceeded",
+		"temporarily",
+		"temporary",
+		"connection reset",
+		"connection refused",
+		"network",
+		"usage returned 403",
+		"usage returned 408",
+		"usage returned 409",
+		"usage returned 425",
+		"usage returned 429",
+		"usage returned 500",
+		"usage returned 502",
+		"usage returned 503",
+		"usage returned 504",
+		"status 403",
+		"status 408",
+		"status 409",
+		"status 425",
+		"status 429",
+		"status 500",
+		"status 502",
+		"status 503",
+		"status 504",
+	} {
+		if strings.Contains(message, token) {
+			return true
+		}
+	}
+	return false
 }
 
 func codexEligibilityDisqualifierReason(auth *Auth, reason blockReason) string {

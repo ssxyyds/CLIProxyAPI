@@ -271,6 +271,79 @@ func TestGetCodexState(t *testing.T) {
 	}
 }
 
+func TestGetCodexState_IncludesUnavailableReasonAndSanitizesImpossibleFiveHour(t *testing.T) {
+	h, manager, _, _, _, _ := newCodexManagementHandler(t)
+	r := setupCodexManagementRouter(h)
+
+	now := time.Now().UTC()
+	badFiveHourReset := now.Add(48 * time.Hour)
+	weeklyReset := now.Add(5 * 24 * time.Hour)
+	remaining := 81.0
+	limit := 100.0
+	errorAuth := &coreauth.Auth{
+		ID:            "codex-error-id",
+		Provider:      "codex",
+		FileName:      "codex-error.json",
+		Status:        coreauth.StatusError,
+		StatusMessage: "unauthorized",
+		Unavailable:   true,
+		LastError:     &coreauth.Error{Code: "unauthorized", Message: "request returned 401", HTTPStatus: http.StatusUnauthorized},
+		Metadata:      map[string]any{"email": "error@example.com"},
+	}
+	errorAuth.SetCodexQuotaState(coreauth.CodexQuotaState{
+		FiveHour:      coreauth.CodexQuotaBucket{Remaining: &remaining, Limit: &limit, ResetAt: &badFiveHourReset},
+		Weekly:        coreauth.CodexQuotaBucket{Remaining: &remaining, Limit: &limit, ResetAt: &weeklyReset},
+		LastRefreshAt: &now,
+		RefreshStatus: "error",
+		RefreshError:  "codex quota refresh: usage returned 403: cloudflare challenge",
+	})
+	if _, err := manager.Register(context.Background(), errorAuth); err != nil {
+		t.Fatalf("register error auth: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/codex-state", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	items := decodeCodexStateItems(t, w.Body.Bytes())
+	var item map[string]any
+	for _, candidate := range items {
+		if candidate["id"] == errorAuth.ID {
+			item = candidate
+			break
+		}
+	}
+	if item == nil {
+		t.Fatalf("expected error auth in codex state items: %#v", items)
+	}
+	if item["status_message"] != "unauthorized" {
+		t.Fatalf("status_message = %#v, want unauthorized", item["status_message"])
+	}
+	if item["unavailable_reason"] != "401 unauthorized" {
+		t.Fatalf("unavailable_reason = %#v, want 401 unauthorized", item["unavailable_reason"])
+	}
+	lastError, ok := item["last_error"].(map[string]any)
+	if !ok {
+		t.Fatalf("last_error = %#v, want object", item["last_error"])
+	}
+	if lastError["http_status"].(float64) != http.StatusUnauthorized {
+		t.Fatalf("last_error.http_status = %#v, want 401", lastError["http_status"])
+	}
+	quota, ok := item["codex_quota"].(map[string]any)
+	if !ok {
+		t.Fatalf("codex_quota = %#v, want object", item["codex_quota"])
+	}
+	if _, exists := quota["five_hour"]; exists {
+		t.Fatalf("codex_quota.five_hour should be hidden for impossible reset: %#v", quota["five_hour"])
+	}
+	if _, exists := quota["weekly"]; !exists {
+		t.Fatalf("codex_quota.weekly missing after five-hour sanitization: %#v", quota)
+	}
+}
+
 func TestGetCodexState_IncludesPoolSummary(t *testing.T) {
 	h, manager, _, _, _, _ := newCodexManagementHandler(t)
 	r := setupCodexManagementRouter(h)

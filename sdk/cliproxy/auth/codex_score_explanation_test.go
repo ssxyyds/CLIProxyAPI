@@ -152,6 +152,63 @@ func TestBuildCodexScoreExplanation_ExplainsUnavailableScore(t *testing.T) {
 	}
 }
 
+func TestBuildCodexScoreExplanation_UsesCachedQuotaDuringTransientRefreshError(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC)
+	weeklyReset := now.Add(4 * time.Hour)
+	lastRefresh := now.Add(-30 * time.Minute)
+	auth := &Auth{Provider: "codex", Metadata: map[string]any{"email": "oauth@example.com"}}
+	auth.SetCodexQuotaState(CodexQuotaState{
+		Weekly: CodexQuotaBucket{
+			Remaining: float64Ptr(24),
+			Limit:     float64Ptr(100),
+			ResetAt:   &weeklyReset,
+		},
+		LastRefreshAt: &lastRefresh,
+		RefreshStatus: "error",
+		RefreshError:  "codex quota refresh: usage returned 403: cloudflare challenge",
+	})
+
+	explanation := BuildCodexScoreExplanation(auth, now)
+	if !explanation.ScoreAvailable {
+		t.Fatalf("ScoreAvailable = false, want true while cached quota is still inside refresh error grace: %#v", explanation)
+	}
+	if !explanation.RefreshIsFresh {
+		t.Fatal("RefreshIsFresh = false, want true for transient refresh error grace")
+	}
+	if explanation.DisqualifierReason != "" {
+		t.Fatalf("DisqualifierReason = %q, want empty", explanation.DisqualifierReason)
+	}
+}
+
+func TestBuildCodexScoreExplanation_DisqualifiesUnauthorizedRefreshError(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC)
+	weeklyReset := now.Add(4 * time.Hour)
+	lastRefresh := now.Add(-5 * time.Minute)
+	auth := &Auth{Provider: "codex", Metadata: map[string]any{"email": "oauth@example.com"}}
+	auth.SetCodexQuotaState(CodexQuotaState{
+		Weekly: CodexQuotaBucket{
+			Remaining: float64Ptr(24),
+			Limit:     float64Ptr(100),
+			ResetAt:   &weeklyReset,
+		},
+		LastRefreshAt: &lastRefresh,
+		RefreshStatus: "error",
+		RefreshError:  "codex quota refresh: usage returned 401: unauthorized",
+	})
+
+	explanation := BuildCodexScoreExplanation(auth, now)
+	if explanation.ScoreAvailable {
+		t.Fatalf("ScoreAvailable = true, want false for unauthorized refresh error: %#v", explanation)
+	}
+	if explanation.DisqualifierReason != "refresh_error_auth" {
+		t.Fatalf("DisqualifierReason = %q, want refresh_error_auth", explanation.DisqualifierReason)
+	}
+}
+
 func TestBuildCodexScoreExplanation_DisabledAuthIsHardIneligible(t *testing.T) {
 	t.Parallel()
 

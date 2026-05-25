@@ -15,6 +15,8 @@ If `routing.strategy` is omitted entirely, CPA still normalizes the empty value 
 
 `codex-quota-score` ranks Codex OAuth-like accounts by live quota state. When the candidate set is not fully Codex OAuth-like, it falls back to fill-first behavior.
 
+The selector depends on weekly quota data first. If weekly is unavailable it can fall back to the five-hour bucket, but that fallback is not the preferred steady state for this branch.
+
 The live score is:
 
 ```text
@@ -34,6 +36,12 @@ Manual score save recalculates the sticky selection immediately. In API contract
 
 Implementation note: `codex-quota-score` must not be handled by the scheduler fast path. The fast path keeps provider/model ready buckets and cursor caches for the built-in `round-robin` and `fill-first` strategies, but it does not evaluate live Codex quota scores. `CodexQuotaScoreSelector` deliberately uses the normal selector path so real requests call the quota score logic directly. This preserves the scheduler cache behavior for existing strategies while ensuring request logs, usage records, and dashboard current selections all point at the actual score-selected account.
 
+Refresh errors are classified before they affect score availability:
+
+- `401`, `unauthorized`, invalid/missing access token, and refresh-token failures are hard auth failures. These accounts do not get a score and expose `refresh_error_auth` as the score disqualifier.
+- Cloudflare challenges, timeouts, network errors, rate limits, and 5xx errors are transient. If cached quota is still inside the transient refresh-error grace window, the selector keeps using that cached quota instead of repeatedly dropping the account score.
+- Normal `ok` refreshes keep the existing 15 minute freshness requirement. The transient grace only protects cached quota during temporary upstream refresh failures; it does not change the background refresh cadence or reset probe cadence.
+
 ## Management API
 
 All endpoints are under `/v0/management` and require the normal management auth middleware.
@@ -46,6 +54,7 @@ Important response fields:
 
 - `id`, `auth_index`, `name`, `email`
 - `provider`, `status`, `disabled`, `unavailable`
+- `status_message`, `last_error`, `unavailable_reason`: account error details for dashboards; for example a 401 response is exposed as `401 unauthorized`
 - `account_type`, `plan_type`, `id_token.plan_type`: Codex plan/package hints such as `free`, `team`, or `plus`
 - `account`: account label derived from the auth metadata
 - `on_device`: whether this account is currently sticky-selected
@@ -99,6 +108,8 @@ The response also includes `summary` for pool-level statistics and `current_sele
 ```
 
 `known` counts accounts that currently have a parsed quota bucket for that window. `last_refresh_at` is the newest quota refresh timestamp among visible Codex OAuth-like accounts.
+
+The management API hides impossible five-hour bucket reset timestamps before returning state. If `five_hour.reset_at` is more than six hours in the future, CPA drops that five-hour bucket from both the account payload and pool summary while keeping weekly data. This prevents stale/polluted 5h display data from misleading dashboards.
 
 ### PATCH /v0/management/codex-state/manual-score
 
@@ -220,6 +231,7 @@ Recommended panels:
 
 - Overview: current routing strategy, weekly remaining total, and five-hour remaining total
 - Credentials/Auth Files: compact per-row Codex score and manual adjustment controls
+- Credentials/Auth Files: per-account token cost from usage history and account quota amount from the weekly quota limit
 - Current sticky/on-device account, preferably from `current_selections`
 - Pool summary: total limit, remaining quota, known account count, and remaining ratio
 - Weekly remaining and reset time

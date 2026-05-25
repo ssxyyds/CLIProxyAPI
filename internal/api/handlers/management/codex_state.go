@@ -263,7 +263,8 @@ func buildCodexStateEntry(auth *coreauth.Auth) gin.H {
 		return nil
 	}
 	auth.EnsureIndex()
-	explanation := coreauth.BuildCodexScoreExplanation(auth, time.Now().UTC())
+	now := time.Now().UTC()
+	explanation := coreauth.BuildCodexScoreExplanation(auth, now)
 	stickyAuthID := coreauth.CurrentCodexStickyAuthID()
 	entry := gin.H{
 		"id":          auth.ID,
@@ -276,6 +277,15 @@ func buildCodexStateEntry(auth *coreauth.Auth) gin.H {
 		"on_device":   strings.TrimSpace(stickyAuthID) != "" && auth.ID == stickyAuthID,
 		coreauth.CodexScoreExplanationMetadataKey: explanation,
 	}
+	if message := strings.TrimSpace(auth.StatusMessage); message != "" {
+		entry["status_message"] = message
+	}
+	if auth.LastError != nil {
+		entry["last_error"] = codexStateErrorPayload(auth.LastError)
+	}
+	if reason := codexStateUnavailableReason(auth); reason != "" {
+		entry["unavailable_reason"] = reason
+	}
 	if email := authEmail(auth); email != "" {
 		entry["email"] = email
 	}
@@ -287,7 +297,7 @@ func buildCodexStateEntry(auth *coreauth.Auth) gin.H {
 		entry["plan_type"] = planType
 	}
 	if quota, ok := auth.GetCodexQuotaState(); ok {
-		entry[coreauth.CodexQuotaMetadataKey] = quota
+		entry[coreauth.CodexQuotaMetadataKey] = codexQuotaStateResponse(sanitizeCodexQuotaStateForDisplay(quota, now))
 	}
 	if manual, ok := auth.CodexManualScoreAdjustment(); ok {
 		entry[coreauth.CodexManualScoreAdjustmentKey] = manual
@@ -305,6 +315,58 @@ func buildCodexStateEntry(auth *coreauth.Auth) gin.H {
 		entry["id_token"] = claims
 	}
 	return entry
+}
+
+func codexStateErrorPayload(err *coreauth.Error) gin.H {
+	if err == nil {
+		return nil
+	}
+	payload := gin.H{
+		"message":   strings.TrimSpace(err.Message),
+		"retryable": err.Retryable,
+	}
+	if code := strings.TrimSpace(err.Code); code != "" {
+		payload["code"] = code
+	}
+	if err.HTTPStatus != 0 {
+		payload["http_status"] = err.HTTPStatus
+	}
+	return payload
+}
+
+func codexStateUnavailableReason(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.LastError != nil {
+		detail := codexFirstNonEmptyString(auth.LastError.Code, auth.StatusMessage, auth.LastError.Message)
+		if auth.LastError.HTTPStatus != 0 {
+			if detail != "" {
+				return fmt.Sprintf("%d %s", auth.LastError.HTTPStatus, detail)
+			}
+			if statusText := strings.ToLower(http.StatusText(auth.LastError.HTTPStatus)); statusText != "" {
+				return fmt.Sprintf("%d %s", auth.LastError.HTTPStatus, statusText)
+			}
+			return fmt.Sprintf("%d", auth.LastError.HTTPStatus)
+		}
+		return detail
+	}
+	if auth.Unavailable {
+		return codexFirstNonEmptyString(auth.StatusMessage, auth.Quota.Reason)
+	}
+	if strings.EqualFold(strings.TrimSpace(string(auth.Status)), string(coreauth.StatusError)) {
+		return strings.TrimSpace(auth.StatusMessage)
+	}
+	return ""
+}
+
+func codexFirstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func buildCodexCurrentSelections(auths []*coreauth.Auth) []gin.H {
@@ -382,6 +444,7 @@ func buildCodexStateSummary(auths []*coreauth.Auth) codexStatePoolSummary {
 			"disabled":    0,
 		},
 	}
+	now := time.Now().UTC()
 	for _, auth := range auths {
 		if shouldHideCodexStateAuth(auth) {
 			continue
@@ -401,6 +464,7 @@ func buildCodexStateSummary(auths []*coreauth.Auth) codexStatePoolSummary {
 		if !ok {
 			continue
 		}
+		quota = sanitizeCodexQuotaStateForDisplay(quota, now)
 		addCodexQuotaBucketToSummary(&summary.Weekly, quota.Weekly)
 		addCodexQuotaBucketToSummary(&summary.FiveHour, quota.FiveHour)
 		if quota.LastRefreshAt != nil && !quota.LastRefreshAt.IsZero() {
@@ -413,6 +477,89 @@ func buildCodexStateSummary(auths []*coreauth.Auth) codexStatePoolSummary {
 	finalizeCodexQuotaPoolWindowSummary(&summary.Weekly)
 	finalizeCodexQuotaPoolWindowSummary(&summary.FiveHour)
 	return summary
+}
+
+func sanitizeCodexQuotaStateForDisplay(quota coreauth.CodexQuotaState, now time.Time) coreauth.CodexQuotaState {
+	if quota.FiveHour.ResetAt != nil && quota.FiveHour.ResetAt.After(now.Add(6*time.Hour)) {
+		quota.FiveHour = coreauth.CodexQuotaBucket{}
+	}
+	return quota
+}
+
+func codexQuotaStateResponse(quota coreauth.CodexQuotaState) gin.H {
+	payload := gin.H{}
+	if bucket := codexQuotaBucketResponse(quota.FiveHour); bucket != nil {
+		payload["five_hour"] = bucket
+	}
+	if bucket := codexQuotaBucketResponse(quota.Weekly); bucket != nil {
+		payload["weekly"] = bucket
+	}
+	if quota.LastRefreshAt != nil && !quota.LastRefreshAt.IsZero() {
+		payload["last_refresh_at"] = quota.LastRefreshAt.UTC()
+	}
+	if value := strings.TrimSpace(quota.RefreshStatus); value != "" {
+		payload["refresh_status"] = value
+	}
+	if value := strings.TrimSpace(quota.RefreshError); value != "" {
+		payload["refresh_error"] = value
+	}
+	if quota.ProbeResetAt != nil && !quota.ProbeResetAt.IsZero() {
+		payload["probe_reset_at"] = quota.ProbeResetAt.UTC()
+	}
+	if quota.ProbeAt != nil && !quota.ProbeAt.IsZero() {
+		payload["probe_at"] = quota.ProbeAt.UTC()
+	}
+	if quota.ProbeVerifiedAt != nil && !quota.ProbeVerifiedAt.IsZero() {
+		payload["probe_verified_at"] = quota.ProbeVerifiedAt.UTC()
+	}
+	if value := strings.TrimSpace(quota.ProbeStatus); value != "" {
+		payload["probe_status"] = value
+	}
+	if value := strings.TrimSpace(quota.ProbeError); value != "" {
+		payload["probe_error"] = value
+	}
+	if quota.BootstrapProbeAt != nil && !quota.BootstrapProbeAt.IsZero() {
+		payload["bootstrap_probe_at"] = quota.BootstrapProbeAt.UTC()
+	}
+	if quota.BootstrapVerifiedAt != nil && !quota.BootstrapVerifiedAt.IsZero() {
+		payload["bootstrap_verified_at"] = quota.BootstrapVerifiedAt.UTC()
+	}
+	if quota.BootstrapNextAfter != nil && !quota.BootstrapNextAfter.IsZero() {
+		payload["bootstrap_next_after"] = quota.BootstrapNextAfter.UTC()
+	}
+	if value := strings.TrimSpace(quota.BootstrapStatus); value != "" {
+		payload["bootstrap_status"] = value
+	}
+	if value := strings.TrimSpace(quota.BootstrapError); value != "" {
+		payload["bootstrap_error"] = value
+	}
+	if value := strings.TrimSpace(quota.BootstrapReason); value != "" {
+		payload["bootstrap_reason"] = value
+	}
+	if quota.BootstrapAttempts > 0 {
+		payload["bootstrap_attempts"] = quota.BootstrapAttempts
+	}
+	if len(payload) == 0 {
+		return nil
+	}
+	return payload
+}
+
+func codexQuotaBucketResponse(bucket coreauth.CodexQuotaBucket) gin.H {
+	payload := gin.H{}
+	if bucket.Remaining != nil {
+		payload["remaining"] = *bucket.Remaining
+	}
+	if bucket.Limit != nil {
+		payload["limit"] = *bucket.Limit
+	}
+	if bucket.ResetAt != nil && !bucket.ResetAt.IsZero() {
+		payload["reset_at"] = bucket.ResetAt.UTC()
+	}
+	if len(payload) == 0 {
+		return nil
+	}
+	return payload
 }
 
 func addCodexQuotaBucketToSummary(summary *codexQuotaPoolWindowSummary, bucket coreauth.CodexQuotaBucket) {

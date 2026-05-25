@@ -51,6 +51,7 @@ type codexStickySelectionState struct {
 var globalCodexStickySelection = &codexStickySelectionState{byKey: map[string]string{}, byProvider: map[string]string{}}
 
 const codexQuotaScoreFreshnessWindow = 15 * time.Minute
+const codexQuotaScoreTransientRefreshErrorGrace = CodexQuotaRefreshInterval * 4
 
 type blockReason int
 
@@ -746,13 +747,21 @@ func codexQuotaRefreshStateUsable(quota CodexQuotaState, now time.Time) bool {
 	if quota.LastRefreshAt == nil || quota.LastRefreshAt.IsZero() {
 		return false
 	}
-	if quota.LastRefreshAt.Before(now.Add(-codexQuotaScoreFreshnessWindow)) {
-		return false
-	}
 	status := strings.ToLower(strings.TrimSpace(quota.RefreshStatus))
 	switch status {
 	case "", "ok", "success", "fresh":
+		if quota.LastRefreshAt.Before(now.Add(-codexQuotaScoreFreshnessWindow)) {
+			return false
+		}
 		return true
+	case "error", "failed":
+		if codexQuotaRefreshErrorIsHardAuthFailure(quota.RefreshError) {
+			return false
+		}
+		if !codexQuotaRefreshErrorIsTransient(quota.RefreshError) {
+			return false
+		}
+		return !quota.LastRefreshAt.Before(now.Add(-codexQuotaScoreTransientRefreshErrorGrace))
 	default:
 		return false
 	}
