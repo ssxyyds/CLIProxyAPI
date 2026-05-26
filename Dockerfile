@@ -1,5 +1,7 @@
 FROM golang:1.26-alpine AS builder
 
+ENV GOPROXY=https://goproxy.cn,direct
+
 WORKDIR /app
 
 COPY go.mod go.sum ./
@@ -16,7 +18,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w -X 'main.Version=${VERSION
 
 FROM alpine:3.23
 
-RUN apk add --no-cache tzdata
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories \
+	&& apk add --no-cache tzdata
 
 RUN mkdir /CLIProxyAPI
 
