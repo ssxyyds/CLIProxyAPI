@@ -247,6 +247,9 @@ func (e *CodexExecutor) refreshCodexQuotaState(ctx context.Context, auth *clipro
 			until := payload.blockedUntil.UTC()
 			blockedUntil = &until
 		}
+		if codexQuotaBucketHasData(payload.state.FiveHour) && codexQuotaBucketHasData(payload.state.Weekly) {
+			break
+		}
 	}
 	if !hadData {
 		if len(errs) == 0 {
@@ -277,9 +280,17 @@ func (e *CodexExecutor) fetchCodexQuotaRefreshDocument(ctx context.Context, auth
 		return nil, fmt.Errorf("codex quota refresh: read %s failed: %w", rawURL, err)
 	}
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		return nil, fmt.Errorf("codex quota refresh: %s returned %d: %s", rawURL, httpResp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, codexQuotaRefreshHTTPError(httpResp.StatusCode, httpResp.Header.Get("Content-Type"), body)
 	}
 	return body, nil
+}
+
+func codexQuotaRefreshHTTPError(statusCode int, contentType string, body []byte) error {
+	message := strings.TrimSpace(helps.SummarizeErrorBody(contentType, body))
+	if message == "" {
+		message = http.StatusText(statusCode)
+	}
+	return fmt.Errorf("codex quota refresh: usage returned %d: %s", statusCode, message)
 }
 
 func codexQuotaRefreshURLs(baseURL string) []string {
@@ -287,11 +298,16 @@ func codexQuotaRefreshURLs(baseURL string) []string {
 	if trimmed == "" {
 		trimmed = "https://chatgpt.com/backend-api/codex"
 	}
-	candidates := []string{trimmed + "/usage"}
+	candidates := make([]string, 0, 2)
+	if whamUsageURL := codexQuotaWhamUsageURL(trimmed); whamUsageURL != "" {
+		candidates = append(candidates, whamUsageURL)
+	}
+	candidates = append(candidates, trimmed+"/usage")
 	seen := make(map[string]struct{}, len(candidates))
 	out := make([]string, 0, len(candidates))
 	for _, candidate := range candidates {
-		if _, err := url.Parse(candidate); err != nil {
+		parsed, err := url.Parse(candidate)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 			continue
 		}
 		if _, ok := seen[candidate]; ok {
@@ -301,6 +317,27 @@ func codexQuotaRefreshURLs(baseURL string) []string {
 		out = append(out, candidate)
 	}
 	return out
+}
+
+func codexQuotaWhamUsageURL(baseURL string) string {
+	parsed, err := url.Parse(strings.TrimRight(strings.TrimSpace(baseURL), "/"))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return ""
+	}
+	path := strings.TrimRight(parsed.Path, "/")
+	switch {
+	case strings.HasSuffix(path, "/backend-api/codex"):
+		parsed.Path = strings.TrimSuffix(path, "/codex") + "/wham/usage"
+	case strings.HasSuffix(path, "/backend-api/wham"):
+		parsed.Path = path + "/usage"
+	case strings.HasSuffix(path, "/backend-api/wham/usage"):
+		parsed.Path = path
+	default:
+		return ""
+	}
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
 }
 
 func parseCodexQuotaRefreshPayload(body []byte) (codexQuotaRefreshPayload, bool) {

@@ -2,6 +2,8 @@
 
 This branch keeps ssxyyds Codex-specific behavior in a thin enhancement layer so upstream syncs stay manageable. Prefer adding new `codex_*` files and small hook points over broad edits to shared routing, config, or executor code.
 
+Prefer reusing existing, upstream-verified project modules and flows before adding new enhancement code. The open-source main branch has broader validation than local handwritten replacements; new Codex-specific logic should be a thin adapter only when the existing executor, auth, management API, proxy, error-classification, or scheduler modules cannot cover the requirement.
+
 ## Routing
 
 Quota-aware Codex selection is the primary routing mode for this branch. The example configuration defaults to:
@@ -152,9 +154,9 @@ Codex OAuth-like accounts get `refresh_interval_seconds = 900` by default. The a
 Refresh behavior:
 
 - Refresh OAuth tokens when a refresh token exists.
-- Fetch Codex quota from `/usage`.
+- Fetch Codex quota from `https://chatgpt.com/backend-api/wham/usage`, with the legacy Codex base `/usage` URL kept as a fallback for compatible local or custom endpoints.
 - Parse five-hour and weekly windows.
-- If `/usage` cannot provide the weekly window, send the configured low-cost bootstrap ping so new accounts can trigger upstream quota statistics.
+- If the usage response cannot provide the weekly window, send the configured low-cost bootstrap ping so new accounts can trigger upstream quota statistics.
 - Preserve previous window data if the upstream response omits one window.
 - Apply quota cooldown when `blocked_until` is present.
 - If a reset window is reached, send a recovery probe request to refresh the next five-hour cycle. This reset recovery probe takes priority over bootstrap probing.
@@ -165,7 +167,7 @@ When validating real Codex accounts from the local CPA development environment, 
 proxy-url: "http://127.0.0.1:7899"
 ```
 
-The quota refresh client honors credential `proxy_url` first, then global `proxy-url`. Direct access to `https://chatgpt.com/backend-api/codex/usage` may time out in this environment, so real-account巡检 verification should use the 7899 proxy unless a credential explicitly sets another working proxy.
+The quota refresh client honors credential `proxy_url` first, then global `proxy-url`. Direct access to `https://chatgpt.com/backend-api/wham/usage` may time out in this environment, so real-account巡检 verification should use the 7899 proxy unless a credential explicitly sets another working proxy.
 
 ## Probe
 
@@ -179,11 +181,11 @@ codex-quota-probe:
 
 The probe calls `/responses/compact` and requires usage evidence in the successful response. The implementation does not record probe成本 or probe次数.
 
-The same probe payload is also used as a bootstrap refresh for new Codex accounts when `/usage` is missing the weekly window. Weekly quota is the scheduling-critical window for `codex-quota-score`; if weekly is already known but five-hour is missing, CPA keeps the partial state and waits for normal usage, headers, or later巡检 to fill five-hour data instead of spending tokens.
+The same probe payload is also used as a bootstrap refresh for new Codex accounts when the usage response is missing the weekly window. Weekly quota is the scheduling-critical window for `codex-quota-score`; if weekly is already known but five-hour is missing, CPA keeps the partial state and waits for normal usage, headers, or later巡检 to fill five-hour data instead of spending tokens.
 
 Bootstrap probing is intentionally conservative:
 
-- A successful bootstrap ping marks the account `bootstrap_status=pending`; CPA does not immediately issue a second `/usage` request.
+- A successful bootstrap ping marks the account `bootstrap_status=pending`; CPA does not immediately issue a second usage request.
 - Later巡检 observes whether upstream has populated weekly data.
 - Once weekly data is known, bootstrap is marked `complete`.
 - Repeated bootstrap attempts use backoff: `15m`, then `1h`, then `6h`, then `24h`.

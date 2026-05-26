@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -91,7 +92,7 @@ func TestCodexExecutorRefresh_UsesUsageEndpointAndParsesUsageWindows(t *testing.
 	var otherRequests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/backend-api/codex/usage":
+		case "/backend-api/wham/usage", "/backend-api/codex/usage":
 			usageRequests.Add(1)
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"rate_limit":{"primary_window":{"used_percent":19,"reset_at":"` + fiveHourReset.Format(time.RFC3339) + `","blocked_until":"` + blockedUntil.Format(time.RFC3339) + `"},"secondary_window":{"used_percent":42,"reset_after_seconds":518400},"additional_rate_limits":[{"window_name":"weekly","remaining":3,"limit":9,"reset_at":"` + fiveHourReset.Format(time.RFC3339) + `"},{"window_name":"five_hour","remaining":1,"limit":9,"reset_at":"` + weeklyReset.Format(time.RFC3339) + `"}]}}`))
@@ -148,6 +149,137 @@ func TestCodexExecutorRefresh_UsesUsageEndpointAndParsesUsageWindows(t *testing.
 	}
 	if !updated.Unavailable || !updated.NextRetryAfter.Equal(blockedUntil) {
 		t.Fatalf("auth cooldown = unavailable %v next %s, want true/%s", updated.Unavailable, updated.NextRetryAfter, blockedUntil)
+	}
+}
+
+func TestCodexExecutorRefresh_PrefersWhamUsageEndpointFromCodexBaseURL(t *testing.T) {
+	t.Parallel()
+
+	weeklyReset := time.Now().Add(6 * 24 * time.Hour).UTC().Truncate(time.Second)
+	fiveHourReset := time.Now().Add(4 * time.Hour).UTC().Truncate(time.Second)
+	var whamRequests atomic.Int32
+	var codexRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/backend-api/wham/usage":
+			whamRequests.Add(1)
+			if got := r.Header.Get("Chatgpt-Account-Id"); got != "acct_123" {
+				t.Fatalf("Chatgpt-Account-Id = %q, want acct_123", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"plan_type":"plus","rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":64,"limit_window_seconds":18000,"reset_at":` + itoaTime(fiveHourReset) + `},"secondary_window":{"used_percent":10,"limit_window_seconds":604800,"reset_at":` + itoaTime(weeklyReset) + `}}}`))
+		case "/backend-api/codex/usage":
+			codexRequests.Add(1)
+			http.NotFound(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{
+			"email":        "user@example.com",
+			"access_token": "token-123",
+			"account_id":   "acct_123",
+		},
+		Attributes: map[string]string{
+			"base_url": server.URL + "/backend-api/codex",
+		},
+	}
+
+	updated, err := executor.Refresh(context.Background(), auth)
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	if got := whamRequests.Load(); got != 1 {
+		t.Fatalf("wham usage endpoint requests = %d, want 1", got)
+	}
+	if got := codexRequests.Load(); got != 0 {
+		t.Fatalf("codex usage endpoint requests = %d, want 0 when wham succeeds", got)
+	}
+	quota, ok := updated.GetCodexQuotaState()
+	if !ok {
+		t.Fatal("GetCodexQuotaState() ok = false, want true")
+	}
+	if quota.FiveHour.Remaining == nil || *quota.FiveHour.Remaining != 36 {
+		t.Fatalf("FiveHour.Remaining = %#v, want 36", quota.FiveHour.Remaining)
+	}
+	if quota.Weekly.Remaining == nil || *quota.Weekly.Remaining != 90 {
+		t.Fatalf("Weekly.Remaining = %#v, want 90", quota.Weekly.Remaining)
+	}
+	if quota.Weekly.ResetAt == nil || !quota.Weekly.ResetAt.Equal(weeklyReset) {
+		t.Fatalf("Weekly.ResetAt = %v, want %v", quota.Weekly.ResetAt, weeklyReset)
+	}
+}
+
+func TestCodexExecutorRefresh_FallsBackToLegacyUsageWhenWhamOmitsWindow(t *testing.T) {
+	t.Parallel()
+
+	weeklyReset := time.Now().Add(6 * 24 * time.Hour).UTC().Truncate(time.Second)
+	fiveHourReset := time.Now().Add(3 * time.Hour).UTC().Truncate(time.Second)
+	staleFiveHourReset := time.Now().Add(90 * time.Minute).UTC().Truncate(time.Second)
+	var whamRequests atomic.Int32
+	var codexRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/backend-api/wham/usage":
+			whamRequests.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"rate_limit":{"secondary_window":{"used_percent":10,"limit_window_seconds":604800,"reset_at":` + itoaTime(weeklyReset) + `}}}`))
+		case "/backend-api/codex/usage":
+			codexRequests.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"quota":{"five_hour":{"remaining":20,"limit":40,"reset_at":"` + fiveHourReset.Format(time.RFC3339) + `"}}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{
+			"email":        "user@example.com",
+			"access_token": "token-123",
+		},
+		Attributes: map[string]string{
+			"base_url": server.URL + "/backend-api/codex",
+		},
+	}
+	auth.SetCodexQuotaState(cliproxyauth.CodexQuotaState{
+		FiveHour: cliproxyauth.CodexQuotaBucket{
+			Remaining: float64Ptr(1),
+			Limit:     float64Ptr(40),
+			ResetAt:   &staleFiveHourReset,
+		},
+	})
+
+	updated, err := executor.Refresh(context.Background(), auth)
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	if got := whamRequests.Load(); got != 1 {
+		t.Fatalf("wham usage endpoint requests = %d, want 1", got)
+	}
+	if got := codexRequests.Load(); got != 1 {
+		t.Fatalf("legacy codex usage endpoint requests = %d, want 1", got)
+	}
+	quota, ok := updated.GetCodexQuotaState()
+	if !ok {
+		t.Fatal("GetCodexQuotaState() ok = false, want true")
+	}
+	if quota.FiveHour.Remaining == nil || *quota.FiveHour.Remaining != 20 {
+		t.Fatalf("FiveHour.Remaining = %#v, want fallback value 20", quota.FiveHour.Remaining)
+	}
+	if quota.FiveHour.ResetAt == nil || !quota.FiveHour.ResetAt.Equal(fiveHourReset) {
+		t.Fatalf("FiveHour.ResetAt = %v, want %v", quota.FiveHour.ResetAt, fiveHourReset)
+	}
+	if quota.Weekly.Remaining == nil || *quota.Weekly.Remaining != 90 {
+		t.Fatalf("Weekly.Remaining = %#v, want wham value 90", quota.Weekly.Remaining)
 	}
 }
 
@@ -653,6 +785,52 @@ func TestCodexExecutorRefresh_PreservesPriorWindowsOnQuotaFetchFailure(t *testin
 	}
 	if updated.Unavailable {
 		t.Fatal("Unavailable = true, want prior quota windows preserved without inventing new cooldown")
+	}
+}
+
+func TestCodexExecutorRefresh_SummarizesHTMLQuotaFetchFailure(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/backend-api/wham/usage", "/backend-api/codex/usage":
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`<html><head><script>window._cf_chl_opt={cType:"managed"}</script></head><body><div>Enable JavaScript and cookies to continue</div></body></html>`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{
+			"email":        "user@example.com",
+			"access_token": "token-123",
+		},
+		Attributes: map[string]string{
+			"base_url": server.URL + "/backend-api/codex",
+		},
+	}
+
+	updated, err := executor.Refresh(context.Background(), auth)
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	quota, ok := updated.GetCodexQuotaState()
+	if !ok {
+		t.Fatal("GetCodexQuotaState() ok = false, want true")
+	}
+	if quota.RefreshStatus != "error" {
+		t.Fatalf("RefreshStatus = %q, want error", quota.RefreshStatus)
+	}
+	if !strings.Contains(quota.RefreshError, "codex quota refresh: usage returned 403") {
+		t.Fatalf("RefreshError = %q, want concise usage status", quota.RefreshError)
+	}
+	if strings.Contains(strings.ToLower(quota.RefreshError), "<html") || strings.Contains(strings.ToLower(quota.RefreshError), "<script") || len(quota.RefreshError) > 256 {
+		t.Fatalf("RefreshError leaked HTML body: %q", quota.RefreshError)
 	}
 }
 
@@ -1174,4 +1352,8 @@ func TestCodexExecutorRefresh_ReprobesNearestEligibleWindowEvenWhenAlreadyProbed
 
 func float64Ptr(v float64) *float64 {
 	return &v
+}
+
+func itoaTime(v time.Time) string {
+	return strconv.FormatInt(v.Unix(), 10)
 }
