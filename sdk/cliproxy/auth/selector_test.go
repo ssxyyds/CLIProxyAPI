@@ -95,6 +95,71 @@ func TestCodexQuotaScoreSelectorUsesManualScoreWithFiveHourFallback(t *testing.T
 	}
 }
 
+func TestCodexQuotaScoreSelectorSkipsExhaustedFiveHourQuota(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	lastRefresh := now.Add(-5 * time.Minute)
+	fiveHourReset := now.Add(2 * time.Hour)
+	weeklyReset := now.Add(5 * 24 * time.Hour)
+	exhausted := &Auth{ID: "exhausted", Provider: "codex", Metadata: map[string]any{"email": "exhausted@example.com"}}
+	exhausted.SetCodexQuotaState(CodexQuotaState{
+		FiveHour:      CodexQuotaBucket{Remaining: float64Ptr(0), Limit: float64Ptr(40), ResetAt: &fiveHourReset},
+		Weekly:        CodexQuotaBucket{Remaining: float64Ptr(95), Limit: float64Ptr(100), ResetAt: &weeklyReset},
+		LastRefreshAt: &lastRefresh,
+		RefreshStatus: "ok",
+	})
+	usable := &Auth{ID: "usable", Provider: "codex", Metadata: map[string]any{"email": "usable@example.com"}}
+	usable.SetCodexQuotaState(CodexQuotaState{
+		FiveHour:      CodexQuotaBucket{Remaining: float64Ptr(4), Limit: float64Ptr(40), ResetAt: &fiveHourReset},
+		Weekly:        CodexQuotaBucket{Remaining: float64Ptr(10), Limit: float64Ptr(100), ResetAt: &weeklyReset},
+		LastRefreshAt: &lastRefresh,
+		RefreshStatus: "ok",
+	})
+
+	selector := &CodexQuotaScoreSelector{sticky: &codexStickySelectionState{byKey: map[string]string{}, byProvider: map[string]string{}}}
+	got, err := selector.Pick(context.Background(), "codex", "gpt-5.4", cliproxyexecutor.Options{}, []*Auth{exhausted, usable})
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil || got.ID != "usable" {
+		t.Fatalf("Pick() auth = %#v, want usable", got)
+	}
+}
+
+func TestCodexQuotaScoreSelectorReturnsCooldownWhenAllFiveHourQuotasExhausted(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	lastRefresh := now.Add(-5 * time.Minute)
+	fiveHourReset := now.Add(2 * time.Hour)
+	weeklyReset := now.Add(5 * 24 * time.Hour)
+	first := &Auth{ID: "first", Provider: "codex", Metadata: map[string]any{"email": "first@example.com"}}
+	first.SetCodexQuotaState(CodexQuotaState{
+		FiveHour:      CodexQuotaBucket{Remaining: float64Ptr(0), Limit: float64Ptr(40), ResetAt: &fiveHourReset},
+		Weekly:        CodexQuotaBucket{Remaining: float64Ptr(95), Limit: float64Ptr(100), ResetAt: &weeklyReset},
+		LastRefreshAt: &lastRefresh,
+		RefreshStatus: "ok",
+	})
+	second := &Auth{ID: "second", Provider: "codex", Metadata: map[string]any{"email": "second@example.com"}}
+	second.SetCodexQuotaState(CodexQuotaState{
+		FiveHour:      CodexQuotaBucket{Remaining: float64Ptr(0), Limit: float64Ptr(40), ResetAt: &fiveHourReset},
+		Weekly:        CodexQuotaBucket{Remaining: float64Ptr(40), Limit: float64Ptr(100), ResetAt: &weeklyReset},
+		LastRefreshAt: &lastRefresh,
+		RefreshStatus: "ok",
+	})
+
+	selector := &CodexQuotaScoreSelector{sticky: &codexStickySelectionState{byKey: map[string]string{}, byProvider: map[string]string{}}}
+	got, err := selector.Pick(context.Background(), "codex", "gpt-5.4", cliproxyexecutor.Options{}, []*Auth{first, second})
+	if err == nil {
+		t.Fatalf("Pick() error = nil, auth = %#v; want cooldown error", got)
+	}
+	var cooldown *modelCooldownError
+	if !errors.As(err, &cooldown) {
+		t.Fatalf("Pick() error = %T, want *modelCooldownError: %v", err, err)
+	}
+}
+
 func TestCodexStickySelectionsByModel(t *testing.T) {
 	t.Parallel()
 

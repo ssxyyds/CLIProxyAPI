@@ -15,7 +15,7 @@ func TestSelectorFromRoutingConfig(t *testing.T) {
 		cfg  *config.Config
 		want any
 	}{
-		{name: "default", cfg: &config.Config{}, want: &coreauth.RoundRobinSelector{}},
+		{name: "default", cfg: &config.Config{}, want: &coreauth.CodexQuotaScoreSelector{}},
 		{name: "fill-first", cfg: &config.Config{Routing: config.RoutingConfig{Strategy: "fillfirst"}}, want: &coreauth.FillFirstSelector{}},
 		{name: "codex-quota-score", cfg: &config.Config{Routing: config.RoutingConfig{Strategy: "codex-quota-score"}}, want: &coreauth.CodexQuotaScoreSelector{}},
 	}

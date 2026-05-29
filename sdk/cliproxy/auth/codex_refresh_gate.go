@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"hash/fnv"
 	"strings"
 	"sync"
@@ -67,6 +68,39 @@ func (g *codexRefreshGate) submit(ctx context.Context, authID string) bool {
 	case g.jobs <- authID:
 		return true
 	}
+}
+
+func (g *codexRefreshGate) runSync(ctx context.Context, authID string, refresh func(context.Context, string) error) error {
+	if refresh == nil {
+		return fmt.Errorf("codex refresh function is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return fmt.Errorf("auth id is required")
+	}
+	if g == nil {
+		return refresh(ctx, authID)
+	}
+
+	g.mu.Lock()
+	if _, exists := g.pending[authID]; exists {
+		g.mu.Unlock()
+		return fmt.Errorf("codex refresh already pending for auth %s", authID)
+	}
+	g.pending[authID] = struct{}{}
+	g.mu.Unlock()
+	defer g.forget(authID)
+
+	if !g.waitForSlot(ctx) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return context.Canceled
+	}
+	return refresh(ctx, authID)
 }
 
 func (g *codexRefreshGate) forget(authID string) {

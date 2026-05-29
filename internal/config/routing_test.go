@@ -6,12 +6,12 @@ func TestNormalizeRoutingStrategy(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]string{
-		"":                  "round-robin",
+		"":                  "codex-quota-score",
 		"round-robin":       "round-robin",
 		"fillfirst":         "fill-first",
 		"FF":                "fill-first",
 		"codex-quota-score": "codex-quota-score",
-		"unknown":           "round-robin",
+		"unknown":           "codex-quota-score",
 	}
 
 	for input, want := range tests {

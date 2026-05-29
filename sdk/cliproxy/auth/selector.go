@@ -394,7 +394,19 @@ func (s *CodexQuotaScoreSelector) Pick(ctx context.Context, provider, model stri
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
 	if canUseCodexQuotaScoreSelection(provider, available) {
-		if picked := pickStickyOrBestCodexQuotaScoreAuth(s.stickyState(), provider, model, available, now); picked != nil {
+		scoreable, exhaustedCount, earliestReset := codexQuotaScoreFilterFiveHourExhausted(available, now)
+		if len(scoreable) == 0 && exhaustedCount == len(available) {
+			providerForError := provider
+			if providerForError == "mixed" {
+				providerForError = ""
+			}
+			resetIn := time.Duration(0)
+			if !earliestReset.IsZero() {
+				resetIn = earliestReset.Sub(now)
+			}
+			return nil, newModelCooldownError(model, providerForError, resetIn)
+		}
+		if picked := pickStickyOrBestCodexQuotaScoreAuth(s.stickyState(), provider, model, scoreable, now); picked != nil {
 			return picked, nil
 		}
 	}
@@ -410,6 +422,7 @@ func (s *CodexQuotaScoreSelector) stickyState() *codexStickySelectionState {
 
 type codexQuotaScoreSnapshot struct {
 	auth                   *Auth
+	disqualified           bool
 	hasKnownScore          bool
 	finalScore             float64
 	hasWeeklyRemaining     bool
@@ -434,6 +447,30 @@ func canUseCodexQuotaScoreSelection(provider string, auths []*Auth) bool {
 		}
 	}
 	return true
+}
+
+func codexQuotaScoreFilterFiveHourExhausted(auths []*Auth, now time.Time) ([]*Auth, int, time.Time) {
+	filtered := make([]*Auth, 0, len(auths))
+	exhaustedCount := 0
+	var earliestReset time.Time
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		quota, ok := auth.GetCodexQuotaState()
+		if ok && codexFiveHourQuotaExhausted(quota.FiveHour, now) {
+			exhaustedCount++
+			if quota.FiveHour.ResetAt != nil && !quota.FiveHour.ResetAt.IsZero() {
+				reset := quota.FiveHour.ResetAt.UTC()
+				if earliestReset.IsZero() || reset.Before(earliestReset) {
+					earliestReset = reset
+				}
+			}
+			continue
+		}
+		filtered = append(filtered, auth)
+	}
+	return filtered, exhaustedCount, earliestReset
 }
 
 func pickBestCodexQuotaScoreAuth(auths []*Auth, now time.Time) *Auth {
@@ -720,6 +757,9 @@ func codexQuotaScoreSnapshotForAuth(auth *Auth, now time.Time) codexQuotaScoreSn
 		return snapshot
 	}
 	explanation := BuildCodexScoreExplanation(auth, now)
+	if explanation.DisqualifierReason != "" {
+		snapshot.disqualified = true
+	}
 	quota, ok := auth.GetCodexQuotaState()
 	if !ok {
 		return snapshot
@@ -768,6 +808,9 @@ func codexQuotaRefreshStateUsable(quota CodexQuotaState, now time.Time) bool {
 }
 
 func codexQuotaScoreLess(left, right codexQuotaScoreSnapshot) bool {
+	if left.disqualified != right.disqualified {
+		return !left.disqualified
+	}
 	if left.hasKnownScore != right.hasKnownScore {
 		return left.hasKnownScore
 	}

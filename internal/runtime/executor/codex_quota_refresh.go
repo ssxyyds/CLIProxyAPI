@@ -9,12 +9,20 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
+)
+
+var (
+	codexQuotaPostProbeUsageDelay = 3 * time.Second
+	codexQuotaPostProbeUsageMu    sync.Mutex
+	codexQuotaPostProbeUsageSeen  = map[string]time.Time{}
 )
 
 func (e *CodexExecutor) verifyCodexQuotaRecovery(ctx context.Context, auth *cliproxyauth.Auth, state cliproxyauth.CodexQuotaState, now, resetAt time.Time) (cliproxyauth.CodexQuotaState, bool) {
@@ -98,6 +106,99 @@ func codexQuotaBootstrapBackoff(attempts int) time.Duration {
 	}
 }
 
+func (e *CodexExecutor) refreshCodexQuotaStateAfterProbe(ctx context.Context, auth *cliproxyauth.Auth, state cliproxyauth.CodexQuotaState, key string) (cliproxyauth.CodexQuotaState, *time.Time) {
+	if strings.TrimSpace(key) == "" || !codexQuotaClaimPostProbeUsageKey(key, time.Now().UTC()) {
+		return state, nil
+	}
+	if err := codexQuotaWaitPostProbeUsageDelay(ctx); err != nil {
+		state.RefreshStatus = "error"
+		state.RefreshError = strings.TrimSpace(err.Error())
+		return state, nil
+	}
+	if auth != nil {
+		auth.SetCodexQuotaState(state)
+	}
+	refreshed, blockedUntil, err := e.refreshCodexQuotaState(ctx, auth, time.Now().UTC())
+	if err != nil {
+		state.RefreshStatus = "error"
+		state.RefreshError = strings.TrimSpace(err.Error())
+		return state, nil
+	}
+	return refreshed, blockedUntil
+}
+
+func codexQuotaWaitPostProbeUsageDelay(ctx context.Context) error {
+	delay := codexQuotaPostProbeUsageDelay
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("codex quota post-probe usage refresh: %w", ctx.Err())
+	case <-timer.C:
+		return nil
+	}
+}
+
+func codexQuotaClaimPostProbeUsageKey(key string, now time.Time) bool {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return false
+	}
+	codexQuotaPostProbeUsageMu.Lock()
+	defer codexQuotaPostProbeUsageMu.Unlock()
+	for seenKey, expiresAt := range codexQuotaPostProbeUsageSeen {
+		if !expiresAt.After(now) {
+			delete(codexQuotaPostProbeUsageSeen, seenKey)
+		}
+	}
+	if _, ok := codexQuotaPostProbeUsageSeen[key]; ok {
+		return false
+	}
+	codexQuotaPostProbeUsageSeen[key] = now.Add(8 * 24 * time.Hour)
+	return true
+}
+
+func codexQuotaPostProbeUsageKey(auth *cliproxyauth.Auth, phase string, at time.Time) string {
+	identity := codexQuotaPostProbeAuthIdentity(auth)
+	if identity == "" {
+		identity = "anonymous"
+	}
+	return strings.Join([]string{
+		strings.TrimSpace(phase),
+		identity,
+		at.UTC().Format(time.RFC3339Nano),
+	}, "|")
+}
+
+func codexQuotaPostProbeAuthIdentity(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if id := strings.TrimSpace(auth.ID); id != "" {
+		return "id:" + id
+	}
+	if index := strings.TrimSpace(auth.EnsureIndex()); index != "" {
+		return "index:" + index
+	}
+	_, account := auth.AccountInfo()
+	if account = strings.TrimSpace(account); account != "" {
+		baseURL := ""
+		if auth.Attributes != nil {
+			baseURL = strings.TrimSpace(auth.Attributes["base_url"])
+		}
+		return "account:" + strings.ToLower(account) + "@" + strings.ToLower(baseURL)
+	}
+	if auth.Attributes != nil {
+		if baseURL := strings.TrimSpace(auth.Attributes["base_url"]); baseURL != "" {
+			return "base_url:" + strings.ToLower(baseURL)
+		}
+	}
+	return ""
+}
+
 func (e *CodexExecutor) runCodexQuotaRecoveryProbe(ctx context.Context, auth *cliproxyauth.Auth) error {
 	token, baseURL := codexCreds(auth)
 	if strings.TrimSpace(token) == "" {
@@ -107,7 +208,8 @@ func (e *CodexExecutor) runCodexQuotaRecoveryProbe(ctx context.Context, auth *cl
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
 	probeURL := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
-	body := codexQuotaProbePayload(e.cfg)
+	model, body := codexQuotaProbeRequest(e.cfg)
+	reporter := helps.NewUsageReporter(ctx, e.Identifier(), model, auth)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, probeURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("codex recovery probe: build request failed: %w", err)
@@ -115,7 +217,9 @@ func (e *CodexExecutor) runCodexQuotaRecoveryProbe(ctx context.Context, auth *cl
 	applyCodexHeaders(httpReq, auth, token, false, e.cfg)
 	httpReq.Header.Set("Accept", "application/json")
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpResp, err := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0).Do(httpReq)
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient = reporter.TrackHTTPClient(httpClient)
+	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("codex recovery probe: request failed: %w", err)
 	}
@@ -130,10 +234,18 @@ func (e *CodexExecutor) runCodexQuotaRecoveryProbe(ctx context.Context, auth *cl
 	if !codexProbeUsageEvidence(responseBody) {
 		return fmt.Errorf("codex recovery probe: no usage evidence in successful response")
 	}
+	if detail, ok := codexProbeUsageDetail(responseBody); ok {
+		reporter.Publish(ctx, detail)
+	}
 	return nil
 }
 
 func codexQuotaProbePayload(cfg *config.Config) []byte {
+	_, body := codexQuotaProbeRequest(cfg)
+	return body
+}
+
+func codexQuotaProbeRequest(cfg *config.Config) (string, []byte) {
 	model := "gpt-5.4-mini"
 	prompt := "ping"
 	if cfg != nil {
@@ -180,9 +292,9 @@ func codexQuotaProbePayload(cfg *config.Config) []byte {
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return []byte(`{"model":"gpt-5.4-mini","instructions":"","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"ping"}]}]}`)
+		return "gpt-5.4-mini", []byte(`{"model":"gpt-5.4-mini","instructions":"","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"ping"}]}]}`)
 	}
-	return body
+	return model, body
 }
 
 func codexProbeUsageEvidence(body []byte) bool {
@@ -204,6 +316,26 @@ func codexProbeUsageEvidence(body []byte) bool {
 		}
 	}
 	return false
+}
+
+func codexProbeUsageDetail(body []byte) (usage.Detail, bool) {
+	if detail := helps.ParseOpenAIUsage(body); hasCodexProbeUsageTokens(detail) {
+		return detail, true
+	}
+	if detail, ok := helps.ParseCodexUsage(body); ok && hasCodexProbeUsageTokens(detail) {
+		return detail, true
+	}
+	return usage.Detail{}, false
+}
+
+func hasCodexProbeUsageTokens(detail usage.Detail) bool {
+	return detail.InputTokens != 0 ||
+		detail.OutputTokens != 0 ||
+		detail.ReasoningTokens != 0 ||
+		detail.CachedTokens != 0 ||
+		detail.CacheReadTokens != 0 ||
+		detail.CacheCreationTokens != 0 ||
+		detail.TotalTokens != 0
 }
 
 type codexQuotaRefreshPayload struct {

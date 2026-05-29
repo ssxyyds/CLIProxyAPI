@@ -863,11 +863,28 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 			if blockedUntil == nil {
 				if probeResetAt, ok := quotaState.CodexProbeEligibleResetAt(now); ok {
 					quotaState, verifiedRecovery = e.verifyCodexQuotaRecovery(ctx, auth, quotaState, now, *probeResetAt)
+					if verifiedRecovery {
+						var postProbeBlockedUntil *time.Time
+						quotaState, postProbeBlockedUntil = e.refreshCodexQuotaStateAfterProbe(ctx, auth, quotaState, codexQuotaPostProbeUsageKey(auth, "recovery", *probeResetAt))
+						if postProbeBlockedUntil != nil {
+							blockedUntil = postProbeBlockedUntil
+						}
+						verifiedRecovery = quotaState.CodexProbeVerifiedForReset(*probeResetAt)
+					}
 				} else {
 					var bootstrapBlockedUntil *time.Time
 					quotaState, bootstrapBlockedUntil = e.bootstrapCodexQuotaUsageIfWindowMissing(ctx, auth, quotaState, now)
 					if bootstrapBlockedUntil != nil {
 						blockedUntil = bootstrapBlockedUntil
+					} else if quotaState.BootstrapStatus == "pending" && quotaState.BootstrapProbeAt != nil && quotaState.BootstrapVerifiedAt != nil && quotaState.BootstrapProbeAt.UTC().Equal(quotaState.BootstrapVerifiedAt.UTC()) {
+						var postProbeBlockedUntil *time.Time
+						quotaState, postProbeBlockedUntil = e.refreshCodexQuotaStateAfterProbe(ctx, auth, quotaState, codexQuotaPostProbeUsageKey(auth, "bootstrap", *quotaState.BootstrapProbeAt))
+						if postProbeBlockedUntil != nil {
+							blockedUntil = postProbeBlockedUntil
+						}
+						if codexQuotaBucketHasData(quotaState.Weekly) {
+							quotaState = markCodexQuotaBootstrapComplete(quotaState)
+						}
 					} else if windowResetAt, ok := quotaState.CodexProbeWindowResetAt(now); ok {
 						verifiedRecovery = quotaState.CodexProbeVerifiedForReset(*windowResetAt)
 					}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -35,6 +36,27 @@ func (e schedulerProviderTestExecutor) CountTokens(ctx context.Context, auth *Au
 
 func (e schedulerProviderTestExecutor) HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error) {
 	return nil, nil
+}
+
+type timingRefreshTestExecutor struct {
+	schedulerProviderTestExecutor
+	mu    sync.Mutex
+	times []time.Time
+}
+
+func (e *timingRefreshTestExecutor) Refresh(ctx context.Context, auth *Auth) (*Auth, error) {
+	e.mu.Lock()
+	e.times = append(e.times, time.Now())
+	e.mu.Unlock()
+	return auth, nil
+}
+
+func (e *timingRefreshTestExecutor) snapshots() []time.Time {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]time.Time, len(e.times))
+	copy(out, e.times)
+	return out
 }
 
 type unauthorizedRefreshTestExecutor struct {
@@ -87,6 +109,40 @@ func TestManager_RefreshAuthUnauthorizedFailureStopsAutoRefreshRetry(t *testing.
 	}
 	if _, shouldSchedule := nextRefreshCheckAt(now, updated, time.Second); shouldSchedule {
 		t.Fatal("expected unauthorized auth to be removed from the auto-refresh schedule")
+	}
+}
+
+func TestManager_RefreshNowCodexUsesRefreshGate(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.codexRefreshGate = newCodexRefreshGate(1, 50*time.Millisecond)
+	exec := &timingRefreshTestExecutor{
+		schedulerProviderTestExecutor: schedulerProviderTestExecutor{provider: "codex"},
+	}
+	manager.RegisterExecutor(exec)
+
+	first := &Auth{ID: "codex-refresh-now-1", Provider: "codex", Metadata: map[string]any{"email": "one@example.com"}}
+	second := &Auth{ID: "codex-refresh-now-2", Provider: "codex", Metadata: map[string]any{"email": "two@example.com"}}
+	if _, err := manager.Register(ctx, first); err != nil {
+		t.Fatalf("register first auth: %v", err)
+	}
+	if _, err := manager.Register(ctx, second); err != nil {
+		t.Fatalf("register second auth: %v", err)
+	}
+
+	if err := manager.RefreshNow(ctx, first.ID); err != nil {
+		t.Fatalf("RefreshNow(first) error = %v", err)
+	}
+	if err := manager.RefreshNow(ctx, second.ID); err != nil {
+		t.Fatalf("RefreshNow(second) error = %v", err)
+	}
+
+	times := exec.snapshots()
+	if len(times) != 2 {
+		t.Fatalf("refresh call count = %d, want 2", len(times))
+	}
+	if delta := times[1].Sub(times[0]); delta < 45*time.Millisecond {
+		t.Fatalf("refresh calls separated by %s, want gate interval", delta)
 	}
 }
 

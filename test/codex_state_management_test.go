@@ -204,8 +204,8 @@ func TestGetCodexState(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
 		t.Fatalf("unmarshal codex state response: %v", err)
 	}
-	if response["routing_strategy"] != "round-robin" {
-		t.Fatalf("expected routing strategy round-robin, got %#v", response["routing_strategy"])
+	if response["routing_strategy"] != "codex-quota-score" {
+		t.Fatalf("expected routing strategy codex-quota-score, got %#v", response["routing_strategy"])
 	}
 
 	items := decodeCodexStateItems(t, w.Body.Bytes())

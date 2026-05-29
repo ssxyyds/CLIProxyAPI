@@ -120,6 +120,38 @@ func TestBuildCodexScoreExplanation_FallsBackToFiveHourWhenWeeklyResetMissing(t 
 	}
 }
 
+func TestBuildCodexScoreExplanation_DisqualifiesExhaustedFiveHourWindow(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC)
+	fiveHourReset := now.Add(2 * time.Hour)
+	weeklyReset := now.Add(5 * 24 * time.Hour)
+	lastRefresh := now.Add(-5 * time.Minute)
+	auth := &Auth{Provider: "codex", Metadata: map[string]any{"email": "oauth@example.com"}}
+	auth.SetCodexQuotaState(CodexQuotaState{
+		FiveHour: CodexQuotaBucket{
+			Remaining: float64Ptr(0),
+			Limit:     float64Ptr(40),
+			ResetAt:   &fiveHourReset,
+		},
+		Weekly: CodexQuotaBucket{
+			Remaining: float64Ptr(95),
+			Limit:     float64Ptr(100),
+			ResetAt:   &weeklyReset,
+		},
+		LastRefreshAt: &lastRefresh,
+		RefreshStatus: "ok",
+	})
+
+	explanation := BuildCodexScoreExplanation(auth, now)
+	if explanation.ScoreAvailable {
+		t.Fatalf("ScoreAvailable = true, want false while five-hour quota is exhausted: %#v", explanation)
+	}
+	if explanation.DisqualifierReason != "five_hour_exhausted" {
+		t.Fatalf("DisqualifierReason = %q, want five_hour_exhausted", explanation.DisqualifierReason)
+	}
+}
+
 func TestBuildCodexScoreExplanation_ExplainsUnavailableScore(t *testing.T) {
 	t.Parallel()
 

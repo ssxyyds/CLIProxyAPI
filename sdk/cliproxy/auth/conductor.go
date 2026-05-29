@@ -190,6 +190,7 @@ type Manager struct {
 	// Auto refresh state
 	refreshCancel context.CancelFunc
 	refreshLoop   *authAutoRefreshLoop
+	codexRefreshGate *codexRefreshGate
 
 	requestPrepareLocks sync.Map
 }
@@ -211,6 +212,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		homeRuntimeAuths: make(map[string]map[string]*Auth),
 		providerOffsets:  make(map[string]int),
 		modelPoolOffsets: make(map[string]int),
+		codexRefreshGate: newCodexRefreshGate(codexRefreshGateConcurrency, codexRefreshMinInterval),
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
@@ -2917,6 +2919,49 @@ func (m *Manager) GetByID(id string) (*Auth, bool) {
 
 // RefreshNow refreshes a single auth entry immediately and persists the updated state.
 func (m *Manager) RefreshNow(ctx context.Context, id string) error {
+	if m == nil {
+		return fmt.Errorf("manager is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return fmt.Errorf("auth id is required")
+	}
+	m.mu.RLock()
+	auth := m.auths[id]
+	var exec ProviderExecutor
+	if auth != nil {
+		exec = m.executors[auth.Provider]
+	}
+	m.mu.RUnlock()
+	if auth == nil {
+		return fmt.Errorf("auth not found")
+	}
+	if exec == nil {
+		return fmt.Errorf("executor not registered for provider: %s", auth.Provider)
+	}
+	if IsCodexOAuthLikeAuth(auth) {
+		return m.sharedCodexRefreshGate().runSync(ctx, id, m.refreshNowDirect)
+	}
+	return m.refreshNowDirect(ctx, id)
+}
+
+func (m *Manager) sharedCodexRefreshGate() *codexRefreshGate {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	if m.codexRefreshGate == nil {
+		m.codexRefreshGate = newCodexRefreshGate(codexRefreshGateConcurrency, codexRefreshMinInterval)
+	}
+	gate := m.codexRefreshGate
+	m.mu.Unlock()
+	return gate
+}
+
+func (m *Manager) refreshNowDirect(ctx context.Context, id string) error {
 	if m == nil {
 		return fmt.Errorf("manager is nil")
 	}

@@ -36,11 +36,12 @@ func newAuthAutoRefreshLoop(manager *Manager, interval time.Duration, concurrenc
 	if jobBuffer < 64 {
 		jobBuffer = 64
 	}
+	codexGate := manager.sharedCodexRefreshGate()
 	return &authAutoRefreshLoop{
 		manager:     manager,
 		interval:    interval,
 		concurrency: concurrency,
-		codexGate:   newCodexRefreshGate(codexRefreshGateConcurrency, codexRefreshMinInterval),
+		codexGate:   codexGate,
 		index:       make(map[string]*refreshHeapItem),
 		dirty:       make(map[string]struct{}),
 		wakeCh:      make(chan struct{}, 1),

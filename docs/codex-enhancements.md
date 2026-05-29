@@ -179,7 +179,9 @@ codex-quota-probe:
   prompt: "ping"
 ```
 
-The probe calls `/responses/compact` and requires usage evidence in the successful response. The implementation does not record probe成本 or probe次数.
+The probe calls `/responses/compact` and requires usage evidence in the successful response.
+
+Successful probe responses publish their token usage through the same usage reporter used by normal Codex requests. This keeps downstream usage consumers, including total account quota estimation, aligned with the real weekly quota consumed by reset recovery and bootstrap pings. CPA does not expose a separate probe count metric.
 
 The same probe payload is also used as a bootstrap refresh for new Codex accounts when the usage response is missing the weekly window. Weekly quota is the scheduling-critical window for `codex-quota-score`; if weekly is already known but five-hour is missing, CPA keeps the partial state and waits for normal usage, headers, or later巡检 to fill five-hour data instead of spending tokens.
 

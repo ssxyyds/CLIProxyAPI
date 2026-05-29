@@ -282,11 +282,11 @@ func (h *Handler) PutForceModelPrefix(c *gin.Context) {
 func normalizeRoutingStrategy(strategy string) (string, bool) {
 	normalized := strings.ToLower(strings.TrimSpace(strategy))
 	switch normalized {
-	case "", "round-robin", "roundrobin", "rr":
+	case "round-robin", "roundrobin", "rr":
 		return "round-robin", true
 	case "fill-first", "fillfirst", "ff":
 		return "fill-first", true
-	case "codex-quota-score":
+	case "", "codex-quota-score":
 		return "codex-quota-score", true
 	default:
 		return "", false

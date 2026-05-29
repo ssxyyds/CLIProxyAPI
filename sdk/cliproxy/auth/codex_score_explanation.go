@@ -57,6 +57,10 @@ func BuildCodexScoreExplanation(auth *Auth, now time.Time) CodexScoreExplanation
 	if quota.Weekly.Limit != nil {
 		explanation.WeeklyLimit = float64Ptr(*quota.Weekly.Limit)
 	}
+	if codexFiveHourQuotaExhausted(quota.FiveHour, now) {
+		explanation.DisqualifierReason = "five_hour_exhausted"
+		return explanation
+	}
 	if scoreBucket.Remaining == nil {
 		explanation.DisqualifierReason = "missing_quota_remaining"
 		return explanation
@@ -103,6 +107,13 @@ func codexScoreBucket(quota CodexQuotaState, now time.Time) (CodexQuotaBucket, s
 
 func codexScoreBucketUsable(bucket CodexQuotaBucket, now time.Time) bool {
 	return bucket.Remaining != nil && bucket.ResetAt != nil && bucket.ResetAt.After(now)
+}
+
+func codexFiveHourQuotaExhausted(bucket CodexQuotaBucket, now time.Time) bool {
+	if bucket.Remaining == nil || *bucket.Remaining > 0 {
+		return false
+	}
+	return bucket.ResetAt == nil || bucket.ResetAt.IsZero() || bucket.ResetAt.After(now)
 }
 
 func codexExpiryUrgencyBonus(hoursUntilReset float64) float64 {

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
@@ -70,13 +71,10 @@ func (h *Handler) GetCodexState(c *gin.Context) {
 }
 
 func (h *Handler) codexRoutingStrategy() string {
-	if h == nil || h.cfg == nil {
-		return "round-robin"
+	if h != nil && h.cfg != nil {
+		return internalconfig.NormalizeRoutingStrategy(h.cfg.Routing.Strategy)
 	}
-	if strategy := strings.TrimSpace(h.cfg.Routing.Strategy); strategy != "" {
-		return strategy
-	}
-	return "round-robin"
+	return internalconfig.NormalizeRoutingStrategy("")
 }
 
 func (h *Handler) PatchCodexStateManualScore(c *gin.Context) {
