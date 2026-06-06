@@ -772,6 +772,7 @@ func firstTimePath(body []byte, paths ...string) (time.Time, bool) {
 
 func firstQuotaResetPath(body []byte, now time.Time, paths ...string) (time.Time, bool) {
 	absolutePaths := make([]string, 0, len(paths))
+	relativeSecondPaths := make([]string, 0, len(paths))
 	for _, path := range paths {
 		trimmed := strings.TrimSpace(path)
 		if trimmed == "" {
@@ -779,27 +780,33 @@ func firstQuotaResetPath(body []byte, now time.Time, paths ...string) (time.Time
 		}
 		lower := strings.ToLower(trimmed)
 		if strings.HasSuffix(lower, "seconds") {
-			result := gjson.GetBytes(body, trimmed)
-			if !result.Exists() {
-				continue
-			}
-			seconds := 0.0
-			switch result.Type {
-			case gjson.Number:
-				seconds = result.Float()
-			case gjson.String:
-				if value, ok := cliproxyauthFloatString(result.String()); ok {
-					seconds = value
-				}
-			}
-			if seconds > 0 {
-				return now.Add(time.Duration(seconds * float64(time.Second))).UTC(), true
-			}
+			relativeSecondPaths = append(relativeSecondPaths, trimmed)
 			continue
 		}
 		absolutePaths = append(absolutePaths, trimmed)
 	}
-	return firstTimePath(body, absolutePaths...)
+	if resetAt, ok := firstTimePath(body, absolutePaths...); ok {
+		return resetAt, true
+	}
+	for _, path := range relativeSecondPaths {
+		result := gjson.GetBytes(body, path)
+		if !result.Exists() {
+			continue
+		}
+		seconds := 0.0
+		switch result.Type {
+		case gjson.Number:
+			seconds = result.Float()
+		case gjson.String:
+			if value, ok := cliproxyauthFloatString(result.String()); ok {
+				seconds = value
+			}
+		}
+		if seconds > 0 {
+			return now.Add(time.Duration(seconds * float64(time.Second))).UTC(), true
+		}
+	}
+	return time.Time{}, false
 }
 
 func firstStringPath(body []byte, paths ...string) (string, bool) {

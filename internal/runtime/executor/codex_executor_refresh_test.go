@@ -153,6 +153,47 @@ func TestCodexExecutorRefresh_UsesUsageEndpointAndParsesUsageWindows(t *testing.
 	}
 }
 
+func TestCodexExecutorRefresh_PrefersAbsoluteResetAtOverResetAfterSeconds(t *testing.T) {
+	t.Parallel()
+
+	weeklyReset := time.Now().Add(30 * 24 * time.Hour).UTC().Truncate(time.Second)
+	relativeSeconds := int64(31 * 24 * 60 * 60)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/backend-api/wham/usage":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"rate_limit":{"secondary_window":{"used_percent":12,"limit_window_seconds":604800,"reset_at":` + itoaTime(weeklyReset) + `,"reset_after_seconds":` + strconv.FormatInt(relativeSeconds, 10) + `}}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{
+			"email":        "user@example.com",
+			"access_token": "token-123",
+		},
+		Attributes: map[string]string{
+			"base_url": server.URL + "/backend-api/codex",
+		},
+	}
+
+	updated, err := executor.Refresh(context.Background(), auth)
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	quota, ok := updated.GetCodexQuotaState()
+	if !ok {
+		t.Fatal("GetCodexQuotaState() ok = false, want true")
+	}
+	if quota.Weekly.ResetAt == nil || !quota.Weekly.ResetAt.Equal(weeklyReset) {
+		t.Fatalf("Weekly.ResetAt = %v, want absolute reset_at %v", quota.Weekly.ResetAt, weeklyReset)
+	}
+}
+
 func TestCodexExecutorRefresh_PrefersWhamUsageEndpointFromCodexBaseURL(t *testing.T) {
 	t.Parallel()
 
