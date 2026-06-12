@@ -74,6 +74,7 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	}
 
 	cfg.Routing.Strategy = NormalizeRoutingStrategy(cfg.Routing.Strategy)
+	cfg.NormalizePluginsConfig()
 
 	// Apply the same sanitization pipeline.
 	cfg.SanitizeGeminiKeys()
